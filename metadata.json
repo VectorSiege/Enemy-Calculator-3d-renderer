@@ -1,0 +1,6 @@
+{
+  "name": "Aegis Tactical Telemetry",
+  "description": "High-contrast tactical ballistic simulator, wireframe hitbox analyzer, and real-time combat telemetry console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
