@@ -147,6 +147,3 @@ Typography is split into three functional echelons:
 
 ## Layout & Spacing
 The layout follows an operator's multi-display console layout using a 12-column rigid modular grid.
-
-Š”ÜÝSX]Úœ™XZÙÝÛˆØ\™ŠŠˆÙYÛY[Y]HÜšYÛÛ\\š[™ÈÝ[[XYÙHX[È
-[YKUËRÚ[[ˆZ[\ÙXÛÛ™ÊKXØÝ\˜XÞH˜][Ë[™ÙXZÜÜÝY™šXÚY[˜ÞH\˜Ù[YÙHÚ]Üš^›Û[YÚ]š\ÚXš[]HÝ]\È˜\œË
