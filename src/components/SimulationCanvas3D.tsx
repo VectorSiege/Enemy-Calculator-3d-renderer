@@ -10787,7 +10787,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
                 <div>LMB: Fire / Melee (Hold: Charge) · RMB: ADS · Melee Shove</div>
                 <div>MMB (Hold &amp; Release): Throw/Deploy · MMB (Click): Detonate C4</div>
                 <div>F: Flashlight (Spot / Flood) · Q: Medic Kit (+40% HP)</div>
-                <div>Ctrl (Hold): Show Cursor · Esc: Pause / Resume</div>
+                <div>Ctrl (Hold): Show Cursor · F11: Fullscreen · Esc: Pause / Resume</div>
               </div>
 
               <div className="space-y-2">
