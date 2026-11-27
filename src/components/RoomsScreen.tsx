@@ -1,41 +1,62 @@
+/**
+ * @file RoomsScreen.tsx
+ * Combat Simulation Rooms selector displaying top-down tactical SVG schematics,
+ * breakable grey spawn entrance positions, sealed blue player doorway, and stagger cadence metadata.
+ *
+ * Why procedural top-down SVG schematics instead of live secondary WebGL preview canvases:
+ * - Creating extra WebGL contexts per room card consumes precious GPU contexts (browsers typically limit
+ *   active WebGL contexts to 8–16) and risks silently losing the primary `SimulationCanvas3D` context.
+ * - Inline SVGs render instantaneously with crisp dashed enemy pathing vectors and zero GPU overhead.
+ */
 import React from 'react';
 import { ArrowUpRight, DoorOpen, ShieldAlert, Timer } from 'lucide-react';
 import { ROOM_LAYOUTS } from '../data/arsenal';
 import { RoomLayoutId } from '../types/ballistics';
 
 interface RoomsScreenProps {
+  /** Currently active arena (`corridor_01` or `double_flank_02`). */
   selectedRoomId: RoomLayoutId;
+  /** Updates the selected room configuration without immediately leaving the Rooms tab. */
   onSelectRoom: (roomId: RoomLayoutId) => void;
+  /** Selects the optional target room and switches back to `Range Sim` ready for combat. */
   onDeployToRange: (roomId?: RoomLayoutId) => void;
 }
 
+/**
+ * Top-down vector schematic of the 24m x 120m Firing Corridor (`corridor_01`),
+ * illustrating the recessed spawn bay behind the breakable north grey door and 4-group 6s stagger lane.
+ */
 const CorridorSchematicSvg: React.FC = () => (
   <svg viewBox="0 0 320 170" className="w-full h-44 bg-[#0a0d12] border border-[#1e2638]" aria-hidden="true">
-    {/* Outer Lane Grid */}
-    <rect x="115" y="14" width="90" height="142" fill="#182030" stroke="#2c3a54" strokeWidth="1.5" />
-    {[34, 56, 78, 100, 122].map((y) => (
-      <line key={y} x1="115" y1={y} x2="205" y2={y} stroke="#00f0ff" strokeOpacity="0.16" strokeWidth="1" />
+    {/* Recessed Behind-Door Enemy Spawn Bay */}
+    <rect x="116" y="6" width="88" height="22" fill="#231822" stroke="#ff2a4b" strokeWidth="1.4" strokeDasharray="3 2" />
+    <text x="160" y="19" textAnchor="middle" fill="#ff2a4b" fontSize="6.8" fontFamily="monospace">
+      SPAWN BAY (BEHIND DOOR)
+    </text>
+    {/* 24m x 120m Walled Firing Lane */}
+    <rect x="92" y="28" width="136" height="128" fill="#182030" stroke="#00f0ff" strokeWidth="2" />
+    {[48, 70, 92, 114, 136].map((y) => (
+      <line key={y} x1="92" y1={y} x2="228" y2={y} stroke="#00f0ff" strokeOpacity="0.16" strokeWidth="1" />
     ))}
-    {/* Pylons */}
-    {[28, 56, 84, 112].map((y) => (
-      <g key={y}>
-        <rect x="111" y={y} width="5" height="9" fill="#ffb300" />
-        <rect x="204" y={y} width="5" height="9" fill="#ffb300" />
-      </g>
-    ))}
-    {/* Enemy Spawn Band */}
-    <rect x="122" y="18" width="76" height="6" fill="#ff2a4b" opacity="0.85" />
-    <text x="160" y="36" textAnchor="middle" fill="#ff2a4b" fontSize="8" fontFamily="monospace">
-      FRONTAL SPAWN (5m–140m)
+    {/* Breakable North Grey Door & Sealed South Blue Door */}
+    <rect x="132" y="24" width="56" height="7" fill="#707b8e" stroke="#ff2a4b" strokeWidth="1.3" />
+    <rect x="144" y="152" width="32" height="7" fill="#2540eb" stroke="#00f0ff" strokeWidth="1.2" />
+    <line x1="160" y1="32" x2="160" y2="56" stroke="#ffb300" strokeWidth="1.4" strokeDasharray="3 3" />
+    <text x="160" y="68" textAnchor="middle" fill="#ffb300" fontSize="7.5" fontFamily="monospace">
+      BREAKABLE DOOR · 24M × 120M (4 GRPS · 6S STAGGER)
     </text>
     {/* Player Position */}
-    <circle cx="160" cy="144" r="5" fill="#20df78" />
-    <text x="160" y="133" textAnchor="middle" fill="#20df78" fontSize="8" fontFamily="monospace">
-      OPERATOR
+    <circle cx="160" cy="142" r="5" fill="#20df78" />
+    <text x="160" y="131" textAnchor="middle" fill="#20df78" fontSize="7.5" fontFamily="monospace">
+      OPERATOR (SOUTH DOOR)
     </text>
   </svg>
 );
 
+/**
+ * Top-down vector schematic of the Double Flank Chambers (`double_flank_02`),
+ * illustrating left/right breakable grey entrance doors converging onto the central player hold.
+ */
 const DoubleFlankSchematicSvg: React.FC = () => (
   <svg viewBox="0 0 320 170" className="w-full h-44 bg-[#0a0d12] border border-[#1e2638]" aria-hidden="true">
     {/* Exact Double Flank Chambers Silhouette */}

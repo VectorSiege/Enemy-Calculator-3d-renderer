@@ -1,31 +1,68 @@
+/**
+ * @file LeftTelemetryPanel.tsx
+ * Left Ballistic Parameter Sidebar allowing live switching of weapons (`[1]`/`[2]`), consumables
+ * (`[3–9]` / `[MMB]`), fire modes, aim zone priorities, enemy approach patterns, wave squad counts,
+ * spawn distance, and room selection while keeping the 3D arena mounted.
+ *
+ * How `PrecisionStepper` and live parameter edits propagate:
+ * - Every control writes straight into `App.tsx`'s `config` via `onChangeConfig`, `onSelectSlotWeapon`,
+ *   or `onChangeWaveSize`. Because `SimulationCanvas3D` mirrors `config` into `propsRef.current`, changes
+ *   to firing mode, aim zone, approach pattern, or wave sizes take effect inside the 60Hz loop without
+ *   needing a page reload or tearing down the WebGL context.
+ * - `PrecisionStepper` pairs `[-]`/`[+]` discrete buttons, a direct `<input type="number">`, and an
+ *   invisible `<input type="range">` overlaid on a custom segmented tick bar (`opacity-0`).
+ *
+ * Why overlay a native range input over a custom visual bar instead of styling `::-webkit-slider-thumb`
+ * or building raw pointer-drag math:
+ * - Native `<input type="range">` preserves browser keyboard arrows, touch dragging, and screen-reader
+ *   ARIA semantics out-of-the-box without cross-browser vendor-prefix CSS hacks (`-moz-range-thumb`,
+ *   `-webkit-slider-runnable-track`), while the underlying bar renders crisp Tailwind ticks identically
+ *   across Chromium, Firefox, and Safari.
+ */
 import React from 'react';
 import { ChevronDown } from 'lucide-react';
 import {
   EnemyApproachPattern,
   FiringMode,
+  GrenadeId,
+  GrenadeProfile,
   HitZoneId,
   SimulationConfig,
-  TargetProfile,
   WeaponProfile,
+  WeaponSlot,
 } from '../types/ballistics';
 
-import { ROOM_LAYOUTS } from '../data/arsenal';
+import { GRENADES, ROOM_LAYOUTS } from '../data/arsenal';
 
 interface LeftTelemetryPanelProps {
+  /** Current simulation config synced with `App.tsx` and read via `propsRef` inside `SimulationCanvas3D`. */
   config: SimulationConfig;
+  /** Mutable weapon definitions (includes live damage/RPM/range edits from `ArmoryScreen`). */
   weapons: WeaponProfile[];
-  targets: TargetProfile[];
+  /** Mutable consumable definitions (defaults to `GRENADES` if omitted). */
+  grenades?: GrenadeProfile[];
+  /** Remaining tactical charges per consumable ID, synced across waves and `[E]` crates. */
+  consumableUsages: Record<GrenadeId, number>;
+  /** Current active combat wave (`1..5`). */
   waveNumber: number;
+  /** True while automated burst/tracking fire (`Auto-Engage Squad`) is running. */
   isSimRunning: boolean;
+  /** Applies partial config updates (e.g., `grenadeId`, `firingMode`, `aimZone`, `distanceM`). */
   onChangeConfig: (patch: Partial<SimulationConfig>) => void;
-  onChangeChassisSpawnCount: (targetId: string, count: number) => void;
+  /** Assigns a weapon to `PRIMARY` or `SECONDARY` and restores its saved mag/reserve counts. */
+  onSelectSlotWeapon: (slot: 'PRIMARY' | 'SECONDARY', weaponId: string) => void;
+  /** Switches the currently held hand slot (`PRIMARY`, `SECONDARY`, or `CONSUMABLE`). */
+  onSwitchActiveSlot: (slot: WeaponSlot) => void;
+  /** Overrides enemy count for a specific wave index (`0..4`) in `config.waveGroupSizes`. */
   onChangeWaveSize: (waveIdx: number, size: number) => void;
+  /** Advances to the next wave, restocking weapon reserves while preserving deployed mines/turrets. */
   onStartNextWave: () => void;
-  onSelectTargetPreset: (targetId: string) => void;
+  /** Switches main screen to the Rooms schematic selector. */
   onOpenRooms: () => void;
+  /** Toggles automated tracking/burst fire (`isSimRunning`). */
   onEngageBurst: () => void;
+  /** Full range reset: clears actors, consumables, and drops and restarts Wave 01. */
   onResetRange: () => void;
-  onCycleTarget: () => void;
 }
 
 interface PrecisionStepperProps {
@@ -39,6 +76,9 @@ interface PrecisionStepperProps {
   onChange: (next: number) => void;
 }
 
+/**
+ * Synchronized stepper combining discrete step buttons, clamped numeric input, and an accessible range scrubber.
+ */
 const PrecisionStepper: React.FC<PrecisionStepperProps> = ({
   label,
   value,
@@ -133,23 +173,30 @@ const PrecisionStepper: React.FC<PrecisionStepperProps> = ({
   );
 };
 
+/**
+ * Primary left-hand configuration sidebar for weapon slots, ordnance charges, fire/aim modes, and wave sizing.
+ */
 export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
   config,
   weapons,
-  targets,
+  grenades = GRENADES,
+  consumableUsages,
   waveNumber,
   isSimRunning,
   onChangeConfig,
-  onChangeChassisSpawnCount,
+  onSelectSlotWeapon,
+  onSwitchActiveSlot,
   onChangeWaveSize,
   onStartNextWave,
-  onSelectTargetPreset,
   onOpenRooms,
   onEngageBurst,
   onResetRange,
-  onCycleTarget,
 }) => {
+  // Resolve currently active weapon & consumable defensively in case of live resets
   const activeWeapon = weapons.find((w) => w.id === config.weaponId) ?? weapons[0];
+  const activeGrenade = grenades.find((g) => g.id === config.grenadeId) ?? grenades[2] ?? grenades[0];
+  const primaryList = weapons.filter((w) => w.slot === 'PRIMARY');
+  const secondaryList = weapons.filter((w) => w.slot === 'SECONDARY');
   const activeRoom = ROOM_LAYOUTS.find((r) => r.id === config.roomId) ?? ROOM_LAYOUTS[0];
   const isMelee = activeWeapon.weaponClass === 'MELEE' && !!activeWeapon.melee;
 
@@ -166,52 +213,123 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
           01. Ballistic Parameters
         </h2>
         <span className="font-mono text-[10px] tracking-[0.1em] uppercase text-[#ffb300]">
-          {activeWeapon.code}
+          {activeWeapon.code} · {config.activeSlot}
         </span>
       </div>
 
       <div className="p-4 space-y-5 flex-1 overflow-y-auto">
-        {/* Weapon Platform Dropdown */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="weapon-platform-select"
-              className="font-mono text-[11px] font-medium tracking-[0.08em] uppercase text-[#8c9bb5]"
-            >
-              Weapon Platform
-            </label>
-            <span className="font-mono text-[10px] text-[#00f0ff] tabular-nums">
-              {isMelee
-                ? `${damageLabel} DMG · MELEE`
-                : `${damageLabel} DMG · ${activeWeapon.rpm} RPM`}
-            </span>
+        {/* Active Slot Toggle + Primary, Secondary & Consumable Slot Pickers */}
+        <section className="space-y-2.5">
+          <div className="grid grid-cols-3 gap-1">
+            {(
+              [
+                { slot: 'PRIMARY', keyLabel: '[1]', activeCls: 'bg-[#ffb300] border-[#ffb300] text-[#0a0d12]' },
+                { slot: 'SECONDARY', keyLabel: '[2]', activeCls: 'bg-[#00f0ff] border-[#00f0ff] text-[#0a0d12]' },
+                { slot: 'CONSUMABLE', keyLabel: '[MMB]', activeCls: 'bg-[#20df78] border-[#20df78] text-[#0a0d12]' },
+              ] as const
+            ).map((item) => {
+              const isCur = config.activeSlot === item.slot;
+              return (
+                <button
+                  key={item.slot}
+                  type="button"
+                  onClick={() => onSwitchActiveSlot(item.slot)}
+                  className={`py-1.5 px-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.04em] border transition-colors cursor-pointer truncate ${
+                    isCur
+                      ? item.activeCls
+                      : 'bg-[#0f141d] border-[#232d42] text-[#8c9bb5] hover:text-[#e1e2ea]'
+                  }`}
+                >
+                  {item.slot === 'CONSUMABLE' ? 'ORDNANCE' : `${item.keyLabel} ${item.slot}`}
+                </button>
+              );
+            })}
           </div>
-          <div className="relative">
-            <select
-              id="weapon-platform-select"
-              value={config.weaponId}
-              onChange={(e) => onChangeConfig({ weaponId: e.target.value })}
-              className="chamfer-sm w-full appearance-none bg-[#0f141d] border border-[#232d42] focus:border-[#00f0ff] px-3 py-2.5 pr-9 font-display text-xs font-semibold tracking-[0.04em] text-[#e1e2ea] focus:outline-none cursor-pointer"
-            >
-              {weapons.map((w) => {
-                const dmgText =
-                  w.weaponClass === 'MELEE' && w.melee
-                    ? `MELEE ${w.melee.comboSteps[0].damage}/${w.melee.specialDamage}`
-                    : w.pellets > 1
-                      ? `${w.baseDamage}x${w.pellets} DMG`
-                      : `${w.baseDamage} DMG`;
-                return (
-                  <option key={w.id} value={w.id} className="bg-[#0f141d] text-[#e1e2ea]">
-                    {w.code} — {w.name} ({dmgText})
-                  </option>
-                );
-              })}
-            </select>
-            <ChevronDown
-              size={14}
-              aria-hidden="true"
-              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#ffb300]"
-            />
+
+          <div className="space-y-2">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label
+                  htmlFor="primary-weapon-select"
+                  className="font-mono text-[10px] font-medium tracking-[0.08em] uppercase text-[#ffb300]"
+                >
+                  Primary Slot [1]
+                </label>
+                {config.activeSlot === 'PRIMARY' && (
+                  <span className="font-mono text-[10px] text-[#00f0ff] tabular-nums">
+                    {isMelee
+                      ? `${damageLabel} DMG · MELEE`
+                      : `${damageLabel} DMG · ${activeWeapon.rpm} RPM`}
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <select
+                  id="primary-weapon-select"
+                  value={config.primaryWeaponId}
+                  onChange={(e) => onSelectSlotWeapon('PRIMARY', e.target.value)}
+                  className="chamfer-sm w-full appearance-none bg-[#0f141d] border border-[#232d42] focus:border-[#ffb300] px-3 py-2 pr-8 font-display text-xs font-semibold tracking-[0.04em] text-[#e1e2ea] focus:outline-none cursor-pointer"
+                >
+                  {primaryList.map((w) => {
+                    const dmgText =
+                      w.weaponClass === 'MELEE' && w.melee
+                        ? `MELEE ${w.melee.comboSteps[0].damage}/${w.melee.specialDamage}`
+                        : w.pellets > 1
+                          ? `${w.baseDamage}x${w.pellets} DMG`
+                          : `${w.baseDamage} DMG`;
+                    return (
+                      <option key={w.id} value={w.id} className="bg-[#0f141d] text-[#e1e2ea]">
+                        {w.code} — {w.name} ({dmgText})
+                      </option>
+                    );
+                  })}
+                </select>
+                <ChevronDown
+                  size={14}
+                  aria-hidden="true"
+                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#ffb300]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label
+                  htmlFor="secondary-weapon-select"
+                  className="font-mono text-[10px] font-medium tracking-[0.08em] uppercase text-[#00f0ff]"
+                >
+                  Secondary Slot [2]
+                </label>
+                {config.activeSlot === 'SECONDARY' && (
+                  <span className="font-mono text-[10px] text-[#00f0ff] tabular-nums">
+                    {damageLabel} DMG · {activeWeapon.rpm} RPM
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <select
+                  id="secondary-weapon-select"
+                  value={config.secondaryWeaponId}
+                  onChange={(e) => onSelectSlotWeapon('SECONDARY', e.target.value)}
+                  className="chamfer-sm w-full appearance-none bg-[#0f141d] border border-[#232d42] focus:border-[#00f0ff] px-3 py-2 pr-8 font-display text-xs font-semibold tracking-[0.04em] text-[#e1e2ea] focus:outline-none cursor-pointer"
+                >
+                  {secondaryList.map((w) => {
+                    const dmgText =
+                      w.pellets > 1 ? `${w.baseDamage}x${w.pellets} DMG` : `${w.baseDamage} DMG`;
+                    return (
+                      <option key={w.id} value={w.id} className="bg-[#0f141d] text-[#e1e2ea]">
+                        {w.code} — {w.name} ({dmgText})
+                      </option>
+                    );
+                  })}
+                </select>
+                <ChevronDown
+                  size={14}
+                  aria-hidden="true"
+                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#00f0ff]"
+                />
+              </div>
+            </div>
           </div>
 
           {isMelee && activeWeapon.melee ? (
@@ -222,11 +340,61 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
             </div>
           ) : (
             <div className="font-mono text-[10px] leading-relaxed text-[#8c9bb5] tabular-nums">
-              Falloff {activeWeapon.falloffStartM}m–{activeWeapon.falloffEndM}m (-
-              {activeWeapon.falloffPerMeter}/m) · Pierce {activeWeapon.penetrationDepthM}m (-
+              Crit {activeWeapon.critMultiplier}x · Mags {activeWeapon.maxMagazines}x
+              {activeWeapon.magSize} · Range {activeWeapon.effectiveRangeM}m / Drop{' '}
+              {activeWeapon.dropRangeM}m · Pierce {activeWeapon.penetrationDepthM}m (-
               {activeWeapon.penetrationDropPct}%)
             </div>
           )}
+
+          {/* Tactical Consumables ([3–9] Select, MMB to Use / Detonate C4) */}
+          <div className="pt-2 border-t border-[#1e2638] space-y-1.5">
+            <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.06em]">
+              <span className="text-[#8c9bb5]">Consumables [3–9 · MMB]</span>
+              <span style={{ color: activeGrenade.accentHex }} className="font-semibold">
+                {activeGrenade.code} · {activeGrenade.dropRangeM ?? activeGrenade.radiusM}m
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1">
+              {grenades.map((grn, idx) => {
+                const selected = grn.id === config.grenadeId;
+                const uses = consumableUsages[grn.id] ?? 0;
+                return (
+                  <button
+                    key={grn.id}
+                    type="button"
+                    onClick={() => onChangeConfig({ grenadeId: grn.id as GrenadeId })}
+                    className={`py-1.5 px-1.5 font-mono text-[10px] uppercase tracking-[0.03em] border transition-colors cursor-pointer flex items-center justify-between gap-1 ${
+                      selected
+                        ? 'bg-[#1b2332] font-bold'
+                        : uses === 0
+                          ? 'bg-[#0f141d]/70 border-[#1e2638] text-[#606f89] hover:text-[#e1e2ea]'
+                          : 'bg-[#0f141d] border-[#232d42] text-[#8c9bb5] hover:text-[#e1e2ea]'
+                    }`}
+                    style={
+                      selected
+                        ? { borderColor: grn.accentHex, color: grn.accentHex }
+                        : undefined
+                    }
+                  >
+                    <span className="truncate">
+                      [{idx + 3}] {grn.shortLabel}
+                    </span>
+                    <span
+                      className={`shrink-0 tabular-nums ${
+                        uses === 0 ? 'text-[#ff2a4b]' : ''
+                      }`}
+                    >
+                      {uses}/{grn.maxUsages}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="font-mono text-[10px] text-[#8c9bb5] leading-snug">
+              {activeGrenade.description}
+            </div>
+          </div>
         </section>
 
         {/* Fire Selector / Melee Stance, Aim Priority & Enemy Approach Pattern */}
@@ -341,111 +509,6 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
           </div>
         </section>
 
-        {/* Target Chassis & Multi-Enemy Squad Spawning (up to 60 total) */}
-        <section className="space-y-2.5 pt-3 border-t border-[#1e2638]">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-[11px] font-medium tracking-[0.08em] uppercase text-[#8c9bb5]">
-              Primary Hostile Chassis
-            </span>
-            <button
-              type="button"
-              onClick={onCycleTarget}
-              className="font-mono text-[10px] tracking-[0.08em] uppercase text-[#ffb300] hover:text-[#00f0ff] cursor-pointer"
-            >
-              Cycle Target
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            {targets.map((t) => {
-              const active = t.id === config.targetId;
-              const spawnCount = config.chassisSpawnCounts[t.id] ?? 0;
-              return (
-                <div
-                  key={t.id}
-                  onClick={() => onSelectTargetPreset(t.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      onSelectTargetPreset(t.id);
-                    }
-                  }}
-                  className={`p-2 border text-left transition-colors cursor-pointer space-y-1.5 ${
-                    active
-                      ? 'bg-[#1b2332] border-[#ffb300] text-[#e1e2ea]'
-                      : 'bg-[#0f141d] border-[#232d42] text-[#8c9bb5] hover:text-[#e1e2ea]'
-                  }`}
-                >
-                  <div>
-                    <div className="font-mono text-[10px] text-[#ffb300]">
-                      {t.code} · {t.defaultHp} HP
-                    </div>
-                    <div className="text-[11px] font-medium text-[#e1e2ea] truncate">
-                      {t.name}
-                    </div>
-                  </div>
-                  <div
-                    className="flex items-center justify-between gap-1 pt-1 border-t border-[#1e2638]"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <span className="font-mono text-[9px] uppercase text-[#8c9bb5]">SPAWN</span>
-                    <div className="flex items-center bg-[#0a0d12] border border-[#232d42]">
-                      <button
-                        type="button"
-                        onClick={() => onChangeChassisSpawnCount(t.id, spawnCount - 1)}
-                        aria-label={`Decrease ${t.name} spawn count`}
-                        className="px-1.5 py-0.5 font-mono text-[10px] text-[#8c9bb5] hover:text-[#ffb300] cursor-pointer"
-                      >
-                        -
-                      </button>
-                      <input
-                        type="number"
-                        min={0}
-                        max={60}
-                        value={spawnCount}
-                        aria-label={`${t.name} spawn count`}
-                        onChange={(e) => {
-                          const val = Number(e.target.value);
-                          if (!Number.isNaN(val)) {
-                            onChangeChassisSpawnCount(t.id, val);
-                          }
-                        }}
-                        className="w-7 bg-transparent text-center font-mono text-[11px] font-bold text-[#00f0ff] tabular-nums focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => onChangeChassisSpawnCount(t.id, spawnCount + 1)}
-                        aria-label={`Increase ${t.name} spawn count`}
-                        className="px-1.5 py-0.5 font-mono text-[10px] text-[#8c9bb5] hover:text-[#ffb300] cursor-pointer"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="pt-1 flex items-center justify-between gap-2">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-[#8c9bb5]">
-              Squad Roster ({config.groupSize}/60 Max)
-            </span>
-            <button
-              type="button"
-              onClick={() => onChangeConfig({ mixedGroup: !config.mixedGroup })}
-              className={`px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] border cursor-pointer transition-colors ${
-                config.mixedGroup
-                  ? 'bg-[#1b2332] border-[#00f0ff] text-[#00f0ff]'
-                  : 'bg-[#0f141d] border-[#232d42] text-[#8c9bb5]'
-              }`}
-            >
-              {config.mixedGroup ? 'Custom Mix Linked' : 'Single Chassis'}
-            </button>
-          </div>
-        </section>
-
         {/* Active Room & Wave Schedule */}
         <section className="space-y-3 pt-3 border-t border-[#1e2638]">
           <div className="flex items-center justify-between gap-2">
@@ -456,6 +519,11 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
               <div className="font-mono text-xs font-semibold text-[#00f0ff]">
                 {activeRoom.code} — {activeRoom.name}
               </div>
+              {config.roomId === 'corridor_01' && (
+                <div className="font-mono text-[9px] text-[#ffb300]">
+                  4 Groups · 6.0s Group Stagger
+                </div>
+              )}
             </div>
             <button
               type="button"
@@ -471,7 +539,7 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
             value={config.groupSize}
             unit="UNITS"
             min={1}
-            max={60}
+            max={120}
             step={1}
             accent="amber"
             onChange={(val) => onChangeConfig({ groupSize: val })}
@@ -497,13 +565,13 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
                     <input
                       type="number"
                       min={1}
-                      max={60}
+                      max={120}
                       value={sz}
                       aria-label={`Wave ${idx + 1} group size`}
                       onChange={(e) => {
                         const val = Number(e.target.value);
                         if (!Number.isNaN(val)) {
-                          onChangeWaveSize(idx, Math.max(1, Math.min(60, Math.round(val))));
+                          onChangeWaveSize(idx, Math.max(1, Math.min(120, Math.round(val))));
                         }
                       }}
                       className="w-full bg-transparent text-center font-mono text-xs font-bold text-[#e1e2ea] tabular-nums focus:outline-none"
@@ -515,21 +583,11 @@ export const LeftTelemetryPanel: React.FC<LeftTelemetryPanelProps> = ({
           </div>
 
           <PrecisionStepper
-            label="Primary Target HP"
-            value={config.targetHp}
-            unit="HP"
-            min={50}
-            max={2500}
-            step={25}
-            accent="red"
-            onChange={(val) => onChangeConfig({ targetHp: val })}
-          />
-          <PrecisionStepper
             label="Spawn Range (Corridor)"
             value={config.distanceM}
             unit="M"
             min={5}
-            max={140}
+            max={115}
             step={5}
             accent="amber"
             onChange={(val) => onChangeConfig({ distanceM: val })}

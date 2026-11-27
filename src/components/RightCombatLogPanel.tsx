@@ -1,3 +1,18 @@
+/**
+ * @file RightCombatLogPanel.tsx
+ * Right Combat Telemetry Panel showing theoretical STK/DPS baselines alongside live accumulated
+ * engagement metrics and a filterable chronological stream of shots, melee cleaves, shoves,
+ * ordnance detonations, pickups, turret kills, and incoming hostile attacks.
+ *
+ * How telemetry metrics and log filtering work:
+ * - Theoretical DPS / STK (`computeTheoreticalTelemetry`) computes baseline math directly from the
+ *   live `weapons` and `targets` arrays, so edits in Armory/Targets update predictions immediately.
+ * - Live DPS/damage read `metrics` pushed down from `App.tsx`, swapping the hero DPS readout from
+ *   theoretical to live measured output as soon as `metrics.totalRoundsFired > 0`.
+ * - Filtering (`ALL` | `CRIT` | `CLAW`) computes `filteredLogs` purely at render time without mutating
+ *   or discarding entries in `logs`. A destructive filter that dropped non-matching events in `App.tsx`
+ *   would corrupt saved Blackbox runs and lose incoming damage history if the user toggled tabs mid-wave.
+ */
 import React, { useState } from 'react';
 import { computeTheoreticalTelemetry, formatTimestampMs } from '../engine/ballistics';
 import {
@@ -9,17 +24,27 @@ import {
 } from '../types/ballistics';
 
 interface RightCombatLogPanelProps {
+  /** Active simulation settings used to compute theoretical weapon-vs-target baselines. */
   config: SimulationConfig;
+  /** Live weapon array (reflecting custom Armory stat edits). */
   weapons: WeaponProfile[];
+  /** Live enemy chassis array (reflecting custom TargetsScreen edits). */
   targets: TargetProfile[];
+  /** Capped chronological combat feed (most recent first, max 120 items managed by `App.tsx`). */
   logs: CombatLogEntry[];
+  /** Aggregated accuracy, DPS, TTK, and damage totals from the current engagement session. */
   metrics: EngagementMetrics;
+  /** Snapshots the current `metrics` and session config into the persistent Blackbox archive. */
   onSaveRun: () => void;
+  /** Clears only the live feed and live session counters without resetting deployed 3D actors. */
   onClearLogs: () => void;
 }
 
 type LogFilter = 'ALL' | 'CRIT' | 'CLAW';
 
+/**
+ * Right-hand telemetry sidebar combining theoretical vs live KPIs with a color-coded combat feed.
+ */
 export const RightCombatLogPanel: React.FC<RightCombatLogPanelProps> = ({
   config,
   weapons,
@@ -32,10 +57,18 @@ export const RightCombatLogPanel: React.FC<RightCombatLogPanelProps> = ({
   const [filter, setFilter] = useState<LogFilter>('ALL');
   const theory = computeTheoreticalTelemetry(config, weapons, targets);
 
+  // Non-destructive render-time view filter preserving the underlying chronological `logs` array.
   const filteredLogs = logs.filter((entry) => {
     if (filter === 'CRIT') return entry.isCrit || entry.isStagger;
     if (filter === 'CLAW')
-      return entry.source === 'ENEMY_CLAW' || entry.source === 'ENEMY_DUAL_CLAW';
+      return (
+        entry.source === 'ENEMY_CLAW' ||
+        entry.source === 'ENEMY_DUAL_CLAW' ||
+        entry.source === 'ENEMY_DRONE_BOLT' ||
+        entry.source === 'ENEMY_RANGED' ||
+        entry.source === 'ENEMY_MELEE' ||
+        entry.source === 'ENEMY_EXPLOSION'
+      );
     return true;
   });
 
@@ -130,39 +163,74 @@ export const RightCombatLogPanel: React.FC<RightCombatLogPanelProps> = ({
             const isEnemyAttack =
               entry.source === 'ENEMY_CLAW' ||
               entry.source === 'ENEMY_DUAL_CLAW' ||
-              entry.source === 'ENEMY_DRONE_BOLT';
+              entry.source === 'ENEMY_DRONE_BOLT' ||
+              entry.source === 'ENEMY_RANGED' ||
+              entry.source === 'ENEMY_MELEE' ||
+              entry.source === 'ENEMY_EXPLOSION';
             const isMedkit = entry.source === 'PLAYER_MEDKIT';
+            const isAmmo = entry.source === 'PLAYER_AMMO';
+            const isConsumableBox = entry.source === 'PLAYER_CONSUMABLE';
+            const isTurret = entry.source === 'PLAYER_TURRET';
+            const isGrenade = entry.source === 'PLAYER_GRENADE';
+            const isBurnTick =
+              isGrenade &&
+              (entry.zoneLabel.includes('Incendiary') || entry.zoneLabel.includes('Thermite'));
+
             const eventBadge = isMedkit
               ? { label: `MEDKIT +${entry.hpDamage} HP`, color: 'text-[#20df78]' }
-              : isEnemyAttack
-                ? entry.source === 'ENEMY_DUAL_CLAW'
-                  ? { label: `DUAL CLAW -${entry.hpDamage}`, color: 'text-[#ff2a4b]' }
-                  : entry.source === 'ENEMY_DRONE_BOLT'
-                    ? { label: `DRONE BOLT -${entry.hpDamage}`, color: 'text-[#00f0ff]' }
-                    : { label: `CLAW SLASH -${entry.hpDamage}`, color: 'text-[#ffb300]' }
-                : entry.isKill
-                  ? { label: `ELIMINATED (${entry.hpDamage})`, color: 'text-[#20df78]' }
-                  : entry.isMiss
-                    ? { label: 'ATTACK MISSED', color: 'text-[#8c9bb5]' }
-                    : entry.source === 'PLAYER_SHOVE'
-                      ? { label: `SHOVE ${entry.hpDamage} DMG`, color: 'text-[#00f0ff]' }
-                      : entry.isStagger
-                        ? { label: `STAGGER ${entry.hpDamage} DMG`, color: 'text-[#00f0ff]' }
-                        : entry.isCrit
-                          ? { label: `CRIT ${entry.hpDamage} DMG`, color: 'text-[#ff2a4b]' }
-                          : { label: `HIT ${entry.hpDamage} DMG`, color: 'text-[#ffb300]' };
+              : isAmmo
+                ? { label: `AMMO +${entry.hpDamage} RDS`, color: 'text-[#20df78]' }
+                : isConsumableBox
+                  ? { label: `ORDNANCE +${entry.hpDamage}`, color: 'text-[#00f0ff]' }
+                  : isEnemyAttack
+                    ? entry.source === 'ENEMY_DUAL_CLAW'
+                      ? { label: `DUAL CLAW -${entry.hpDamage}`, color: 'text-[#ff2a4b]' }
+                      : entry.source === 'ENEMY_EXPLOSION'
+                        ? { label: `REACTOR BLAST -${entry.hpDamage}`, color: 'text-[#ff6a00]' }
+                        : entry.source === 'ENEMY_RANGED'
+                          ? { label: `HOSTILE FIRE -${entry.hpDamage}`, color: 'text-[#ffb300]' }
+                          : entry.source === 'ENEMY_MELEE'
+                            ? { label: `BLADE HIT -${entry.hpDamage}`, color: 'text-[#ff2a4b]' }
+                            : entry.source === 'ENEMY_DRONE_BOLT'
+                              ? { label: `ATGM HIT -${entry.hpDamage}`, color: 'text-[#00f0ff]' }
+                              : { label: `CLAW SLASH -${entry.hpDamage}`, color: 'text-[#ffb300]' }
+                    : entry.isKill
+                      ? { label: `ELIMINATED (${entry.hpDamage})`, color: 'text-[#20df78]' }
+                      : isTurret
+                        ? { label: `TURRET ${entry.hpDamage} DMG`, color: 'text-[#20df78]' }
+                        : isGrenade
+                          ? entry.isStagger
+                            ? { label: `STUNNED (${entry.hpDamage} DMG)`, color: 'text-[#00f0ff]' }
+                            : isBurnTick
+                              ? { label: `THERMITE ${entry.hpDamage} DoT`, color: 'text-[#ff6a00]' }
+                              : { label: `BLAST ${entry.hpDamage} DMG`, color: 'text-[#ff2a4b]' }
+                          : entry.isMiss
+                            ? { label: 'ATTACK MISSED', color: 'text-[#8c9bb5]' }
+                            : entry.source === 'PLAYER_SHOVE'
+                              ? { label: `SHOVE ${entry.hpDamage} DMG`, color: 'text-[#00f0ff]' }
+                              : entry.isStagger
+                                ? { label: `STAGGER ${entry.hpDamage} DMG`, color: 'text-[#00f0ff]' }
+                                : entry.isCrit
+                                  ? { label: `CRIT ${entry.hpDamage} DMG`, color: 'text-[#ff2a4b]' }
+                                  : { label: `HIT ${entry.hpDamage} DMG`, color: 'text-[#ffb300]' };
 
             return (
               <div
                 key={entry.id}
                 className={`px-2.5 py-2 border font-mono text-[11px] space-y-1 ${
-                  isMedkit
+                  isMedkit || isAmmo || isTurret
                     ? 'bg-[#20df78]/10 border-[#20df78]/40'
-                    : isEnemyAttack
-                      ? 'bg-[#ff2a4b]/10 border-[#ff2a4b]/40'
-                      : entry.isStagger
-                        ? 'bg-[#00f0ff]/10 border-[#00f0ff]/40'
-                        : 'bg-[#121721] border-[#1e2638]'
+                    : isConsumableBox
+                      ? 'bg-[#00f0ff]/10 border-[#00f0ff]/40'
+                      : isEnemyAttack
+                        ? 'bg-[#ff2a4b]/10 border-[#ff2a4b]/40'
+                        : isBurnTick
+                          ? 'bg-[#ff6a00]/10 border-[#ff6a00]/40'
+                          : entry.isStagger
+                            ? 'bg-[#00f0ff]/10 border-[#00f0ff]/40'
+                            : isGrenade
+                              ? 'bg-[#ffb300]/10 border-[#ffb300]/40'
+                              : 'bg-[#121721] border-[#1e2638]'
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
@@ -177,7 +245,11 @@ export const RightCombatLogPanel: React.FC<RightCombatLogPanelProps> = ({
                   <span className="truncate">
                     {isEnemyAttack
                       ? `${entry.targetName ?? 'Hostile'} · ${entry.zoneLabel}`
-                      : `ACT #${entry.roundNumber.toString().padStart(2, '0')} · ${entry.zoneLabel}`}
+                      : isTurret
+                        ? `SEN · ${entry.targetName ?? 'Hostile'} · ${entry.zoneLabel}`
+                        : isGrenade
+                          ? `ORD · ${entry.targetName ?? 'Hostile'} · ${entry.zoneLabel}`
+                          : `ACT #${entry.roundNumber.toString().padStart(2, '0')} · ${entry.zoneLabel}`}
                   </span>
                   <span className="shrink-0">{entry.distanceM}m</span>
                 </div>

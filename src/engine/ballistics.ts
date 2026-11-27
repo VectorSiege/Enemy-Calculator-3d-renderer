@@ -1,7 +1,9 @@
-import { TARGET_PROFILES, WEAPONS } from '../data/arsenal';
+import { GRENADES, TARGET_PROFILES, WEAPONS } from '../data/arsenal';
 import {
   CombatLogEntry,
   EngagementMetrics,
+  GrenadeId,
+  GrenadeProfile,
   HitZoneId,
   RecoilStep,
   SimulationConfig,
@@ -9,34 +11,117 @@ import {
   WeaponProfile,
 } from '../types/ballistics';
 
+/** Finds a weapon by ID or falls back safely to the first catalog entry. */
 export function getWeaponById(id: string, weaponsList: WeaponProfile[] = WEAPONS): WeaponProfile {
   return weaponsList.find((w) => w.id === id) ?? weaponsList[0] ?? WEAPONS[0];
 }
 
-export function getTargetById(id: string, targetsList: TargetProfile[] = TARGET_PROFILES): TargetProfile {
+/** Finds a hostile target profile by ID or falls back safely to the first catalog entry. */
+export function getTargetById(
+  id: string,
+  targetsList: TargetProfile[] = TARGET_PROFILES
+): TargetProfile {
   return targetsList.find((t) => t.id === id) ?? targetsList[0] ?? TARGET_PROFILES[0];
 }
 
-/**
- * Exact distance falloff curve:
- * - Full 1.0x damage up to weapon.falloffStartM
- * - Decreases by weapon.falloffPerMeter flat damage per meter until weapon.falloffEndM
- * - Clamped to non-zero weapon.minFalloffFactor floor at and beyond falloffEndM
- */
-export function computeRangeFalloff(weapon: WeaponProfile, distanceM: number): number {
-  if (weapon.weaponClass === 'MELEE') return 1.0;
-  if (distanceM <= weapon.falloffStartM) return 1.0;
-  const clampedDist = Math.min(distanceM, weapon.falloffEndM);
-  const damageDrop = (clampedDist - weapon.falloffStartM) * weapon.falloffPerMeter;
-  const effectiveDamage = Math.max(
-    weapon.baseDamage * weapon.minFalloffFactor,
-    weapon.baseDamage - damageDrop
-  );
-  return effectiveDamage / Math.max(1, weapon.baseDamage);
+/** Finds a tactical grenade ordinance profile by ID. */
+export function getGrenadeById(
+  id: GrenadeId,
+  grenadesList: GrenadeProfile[] = GRENADES
+): GrenadeProfile {
+  return grenadesList.find((g) => g.id === id) ?? grenadesList[0] ?? GRENADES[0];
 }
 
 /**
- * Returns the repeatable recoil step scaled by the weapon's progressive recoil coefficient (recoilHeat 0..1)
+ * Returns the synchronized tactical reload duration (ms) shared by App state timers
+ * and 3D first-person viewmodel reload animations. Shell-by-shell weapons reload
+ * one shell per interval (e.g. 0.8s per round for Tempest Breacher).
+ */
+export function getEffectiveReloadDurationMs(weapon: WeaponProfile): number {
+  if (weapon.weaponClass === 'MELEE' || weapon.reloadTimeMs <= 0) return 0;
+  if (weapon.shellByShellReload && weapon.shellReloadMs) {
+    return weapon.shellReloadMs;
+  }
+  return weapon.reloadTimeMs;
+}
+
+/**
+ * Returns the maximum terminal drop distance (m) where damage finishes plunging to zero.
+ */
+export function getWeaponTerminalRangeM(weapon: WeaponProfile): number {
+  if (weapon.weaponClass === 'MELEE') return weapon.melee?.reachM ?? weapon.effectiveRangeM;
+  const effective = Math.max(1, weapon.effectiveRangeM);
+  return Math.max(effective + 1, weapon.dropRangeM ?? Math.round(effective / 0.9));
+}
+
+/**
+ * Shared concave-down logarithmic distance falloff curve:
+ * - Before effectiveRangeM (0 -> Range): declines gradually from 1.0 to the Range knee
+ * - At & past effectiveRangeM (Range -> Drop): smoothly dips into a steep logarithmic drop reaching 0 at dropRangeM.
+ */
+export function computeLogarithmicFalloff(
+  effectiveRangeM: number,
+  dropRangeM: number,
+  distanceM: number
+): number {
+  if (distanceM <= 0) return 1.0;
+
+  const effective = Math.max(0.5, effectiveRangeM);
+  const terminalRange = Math.max(effective + 0.5, dropRangeM);
+  if (distanceM >= terminalRange) return 0.0;
+
+  const k = 6;
+  const logNorm = Math.log1p(k);
+  const postSlopeFactor = k / ((1 + k) * logNorm);
+  const spanAfter = Math.max(0.5, terminalRange - effective);
+
+  const alpha = (postSlopeFactor / 1.6) * (effective / spanAfter);
+  const lossAtEffective = Math.min(0.22, alpha / (1 + alpha));
+  const levelAtEffective = 1 - lossAtEffective;
+
+  if (distanceM <= effective) {
+    const p = Math.max(0, Math.min(1, distanceM / effective));
+    return 1 - lossAtEffective * (0.4 * p + 0.6 * p * p);
+  }
+
+  const t = Math.max(0, Math.min(1, (distanceM - effective) / spanAfter));
+  return levelAtEffective * (Math.log1p((1 - t) * k) / logNorm);
+}
+
+/**
+ * Continuous concave-down logarithmic distance falloff curve applied to all ranged weapons.
+ */
+export function computeRangeFalloff(weapon: WeaponProfile, distanceM: number): number {
+  if (weapon.weaponClass === 'MELEE') return 1.0;
+  return computeLogarithmicFalloff(
+    Math.max(1, weapon.effectiveRangeM),
+    getWeaponTerminalRangeM(weapon),
+    distanceM
+  );
+}
+
+/** Returns a consumable's terminal drop range (m). */
+export function getGrenadeDropRangeM(grenade: GrenadeProfile): number {
+  return Math.max(1, grenade.dropRangeM ?? grenade.radiusM);
+}
+
+/** Returns a consumable's logarithmic range knee (30% of drop range by default, or explicit effectiveRangeM). */
+export function getGrenadeEffectiveRangeM(grenade: GrenadeProfile): number {
+  const drop = getGrenadeDropRangeM(grenade);
+  return Math.max(0.5, Math.min(drop - 0.5, grenade.effectiveRangeM ?? drop * 0.3));
+}
+
+/** Computes logarithmic damage falloff for grenades, mines, C4, laser trip mines, and turrets. */
+export function computeConsumableFalloff(grenade: GrenadeProfile, distanceM: number): number {
+  return computeLogarithmicFalloff(
+    getGrenadeEffectiveRangeM(grenade),
+    getGrenadeDropRangeM(grenade),
+    distanceM
+  );
+}
+
+/**
+ * Returns the repeatable recoil step scaled by the weapon's progressive recoil coefficient (recoilHeat 0..1).
  * Initial rounds use initialScale so aim stays steady; sustained fire ramps toward maxScale.
  */
 export function getRecoilForShot(
@@ -58,11 +143,13 @@ export function getRecoilForShot(
   };
 }
 
-export function computeFalloffEndDamage(weapon: WeaponProfile): number {
-  const factor = computeRangeFalloff(weapon, weapon.falloffEndM);
+/** Returns single-projectile HP damage at the weapon's rated effectiveRangeM threshold. */
+export function computeDamageAtEffectiveRange(weapon: WeaponProfile): number {
+  const factor = computeRangeFalloff(weapon, weapon.effectiveRangeM);
   return Math.round(weapon.baseDamage * factor);
 }
 
+/** Estimates sustained theoretical raw DPS for ranged or melee weapons. */
 export function computePotentialRawDps(weapon: WeaponProfile): number {
   if (weapon.weaponClass === 'MELEE' && weapon.melee) {
     const avgDmg =
@@ -77,7 +164,68 @@ export function computePotentialRawDps(weapon: WeaponProfile): number {
 }
 
 /**
- * Builds an enemy squad up to 60 units, honoring per-chassis spawn allocations
+ * Scores an enemy profile's combat threat tier so wave spawns can split into
+ * escalating difficulty fireteams (light vanguard -> assault -> heavy -> apex siege).
+ */
+export function computeTargetDifficultyScore(target: TargetProfile): number {
+  const silhouetteBias: Record<TargetProfile['silhouette'], number> = {
+    swarmer: 0,
+    drone: 60,
+    mech: 140,
+    exo: 320,
+    brute: 520,
+    titan: 820,
+    tank: 940,
+  };
+  return (
+    target.defaultHp +
+    target.staggerThreshold * 1.4 +
+    target.dualClawDamage * 8 +
+    (silhouetteBias[target.silhouette] ?? 200)
+  );
+}
+
+export interface TieredSpawnAssignment {
+  profile: TargetProfile;
+  groupIndex: number;
+  groupLabel: string;
+  extraGroupDelaySec: number;
+}
+
+/**
+ * Splits a wave roster into distinct difficulty-tiered spawn groups so lighter skirmishers
+ * breach first while heavy tanks, brutes, and bio-titans reinforce in tougher rear groups.
+ * Corridor engagements split waves into 4 groups staggered by 6s per group.
+ */
+export function partitionRosterIntoDifficultyGroups(
+  roster: TargetProfile[],
+  forcedGroups?: number,
+  groupDelaySec = 2.5
+): TieredSpawnAssignment[] {
+  const sorted = [...roster].sort(
+    (a, b) => computeTargetDifficultyScore(a) - computeTargetDifficultyScore(b)
+  );
+  const total = sorted.length;
+  const targetGroupCount = forcedGroups ?? (total >= 12 ? 3 : total >= 4 ? 2 : 1);
+  const numGroups = Math.max(1, Math.min(total, targetGroupCount));
+  const labels =
+    numGroups >= 4
+      ? ['GRP-1 VANGUARD', 'GRP-2 ASSAULT', 'GRP-3 HEAVY', 'GRP-4 APEX SIEGE']
+      : ['GRP-1 VANGUARD', 'GRP-2 ASSAULT', 'GRP-3 HEAVY SIEGE'];
+
+  return sorted.map((profile, idx) => {
+    const groupIndex = Math.min(numGroups - 1, Math.floor((idx * numGroups) / Math.max(1, total)));
+    return {
+      profile,
+      groupIndex,
+      groupLabel: labels[groupIndex] ?? `GRP-${groupIndex + 1}`,
+      extraGroupDelaySec: groupIndex * groupDelaySec,
+    };
+  });
+}
+
+/**
+ * Builds an enemy squad up to 120 units, honoring per-chassis spawn allocations
  * scaled proportionally to the active wave group size.
  */
 export function buildSquadRoster(
@@ -87,7 +235,7 @@ export function buildSquadRoster(
   targetsList: TargetProfile[] = TARGET_PROFILES,
   chassisSpawnCounts?: Record<string, number>
 ): TargetProfile[] {
-  const count = Math.max(1, Math.min(60, Math.round(groupSize)));
+  const count = Math.max(1, Math.min(120, Math.round(groupSize)));
   const primary = getTargetById(primaryTargetId, targetsList);
   const nonTitans = targetsList.filter((t) => t.id !== 'chitin_titan');
 
@@ -161,7 +309,6 @@ export function buildSquadRoster(
         }
       }
 
-      // Build interleaved roster, placing primary target first (if present in allocation)
       const roster: TargetProfile[] = [];
       const countsLeft = { ...allocated };
       if ((countsLeft[primary.id] ?? 0) > 0) {
@@ -216,8 +363,9 @@ export interface SingleShotCalculation {
 }
 
 /**
- * Resolves a single projectile/pellet hit against an enemy target using exact zone multipliers
- * plus optional penetration scaling and stacked stagger damage multiplier.
+ * Resolves a single projectile/pellet hit against an enemy target:
+ * - Applies logarithmic range falloff, weapon weakspot multiplier, & target zone multipliers
+ * - Ranged stagger damage deals 20% more than weapon baseDamage (1.2x), scaled by weakspot multiplier on weakspot hits
  */
 export function resolveShot(
   config: SimulationConfig,
@@ -256,7 +404,7 @@ export function resolveShot(
 
   const zoneLabel =
     zone === 'weakspot'
-      ? target.weakspotLabel
+      ? `${target.weakspotLabel} (${weapon.critMultiplier.toFixed(1)}x)`
       : zone === 'torso'
         ? 'Armored Thorax'
         : 'Extremities';
@@ -275,25 +423,36 @@ export function resolveShot(
   }
 
   const isCrit = zone === 'weakspot';
-  const baseZoneMult =
-    zone === 'weakspot'
-      ? Math.max(0.1, target.weakspotMultiplier)
-      : zone === 'limb'
-        ? target.limbMultiplier
-        : target.torsoMultiplier;
+  const weakspotCombinedMult = Math.max(
+    0.1,
+    weapon.critMultiplier * (target.weakspotMultiplier / 2.0)
+  );
+  const baseZoneMult = isCrit
+    ? weakspotCombinedMult
+    : zone === 'limb'
+      ? target.limbMultiplier
+      : target.torsoMultiplier;
 
-  // Stagger multiplier stacks on top of the current hit-zone multiplier while enemy is staggered
+  // Stagger vulnerability stacks multiplicatively on top of the active hit-zone multiplier
   const totalZoneMult = isTargetStaggered
     ? baseZoneMult * target.staggerDamageMultiplier
     : baseZoneMult;
 
-  const rawDamage = Math.max(
-    1,
-    Math.round(weapon.baseDamage * falloff * totalZoneMult * Math.max(0.05, penetrationFactor))
-  );
+  const penScale = Math.max(0.05, penetrationFactor);
+  const rawDamage =
+    falloff <= 0
+      ? 0
+      : Math.max(1, Math.round(weapon.baseDamage * falloff * totalZoneMult * penScale));
 
   const hpDamage = rawDamage;
-  const staggerDamage = Math.max(1, Math.round(hpDamage * (isCrit ? 1.15 : 0.9)));
+  const weakspotStaggerBoost = isCrit ? Math.max(1, weapon.critMultiplier) : 1.0;
+  const staggerDamage =
+    falloff <= 0
+      ? 0
+      : Math.max(
+          1,
+          Math.round(weapon.baseDamage * 1.2 * falloff * penScale * weakspotStaggerBoost)
+        );
   const nextHp = Math.max(0, currentHp - hpDamage);
   const isKill = currentHp > 0 && nextHp === 0;
 
@@ -311,7 +470,7 @@ export function resolveShot(
 
 /**
  * Resolves a melee normal, special, or shove impact using explicit melee damage,
- * weapon weakspot multiplier (2.0x / 2.4x), and stacked stagger damage multiplier.
+ * weapon weakspot multiplier, per-step stagger multiplier, and stacked stagger vulnerability.
  */
 export function resolveMeleeHit(
   weapon: WeaponProfile,
@@ -320,17 +479,19 @@ export function resolveMeleeHit(
   zone: HitZoneId,
   baseSwingDamage: number,
   explicitStaggerDamage: number | null,
-  isTargetStaggered: boolean
+  isTargetStaggered: boolean,
+  staggerMultiplier = 1.0
 ): SingleShotCalculation {
   const isCrit = zone === 'weakspot';
   const baseMult = isCrit ? weapon.critMultiplier : zone === 'limb' ? 0.85 : 1.0;
   const totalMult = isTargetStaggered ? baseMult * target.staggerDamageMultiplier : baseMult;
 
   const hpDamage = Math.max(1, Math.round(baseSwingDamage * totalMult));
-  const staggerDamage =
+  const rawStagger =
     explicitStaggerDamage !== null
-      ? explicitStaggerDamage
-      : Math.max(1, Math.round(hpDamage * 0.75));
+      ? explicitStaggerDamage * (isCrit ? Math.max(1, weapon.critMultiplier) : 1.0)
+      : hpDamage * 0.75;
+  const staggerDamage = Math.max(1, Math.round(rawStagger * staggerMultiplier));
   const nextHp = Math.max(0, currentHp - hpDamage);
   const isKill = currentHp > 0 && nextHp === 0;
   const zoneLabel = isCrit
@@ -351,6 +512,7 @@ export function resolveMeleeHit(
   };
 }
 
+/** Computes theoretical STK, TTK, and raw DPS for a single target at the configured distance. */
 export function computeTheoreticalTelemetry(
   config: SimulationConfig,
   weaponsList: WeaponProfile[] = WEAPONS,
@@ -426,7 +588,10 @@ export function computeTheoreticalTelemetry(
 
   while (simHp > 0 && shots < 400) {
     if (magRemaining === 0) {
-      totalMs += weapon.reloadTimeMs;
+      totalMs +=
+        weapon.shellByShellReload && weapon.shellReloadMs
+          ? weapon.magSize * weapon.shellReloadMs
+          : weapon.reloadTimeMs;
       magRemaining = weapon.magSize;
     }
     let shotHpTotal = 0;
@@ -478,6 +643,7 @@ export function computeTheoreticalTelemetry(
   };
 }
 
+/** Aggregates live player shot/melee/grenade logs into per-enemy TTK, accuracy, and DPS metrics. */
 export function summarizeEngagement(
   logs: CombatLogEntry[],
   config: SimulationConfig,
@@ -491,7 +657,9 @@ export function summarizeEngagement(
       !l.source ||
       l.source === 'PLAYER' ||
       l.source === 'PLAYER_MELEE' ||
-      l.source === 'PLAYER_SHOVE'
+      l.source === 'PLAYER_SHOVE' ||
+      l.source === 'PLAYER_GRENADE' ||
+      l.source === 'PLAYER_TURRET'
   );
   const totalRoundsFired = playerLogs.length;
   const hits = playerLogs.filter((l) => !l.isMiss);
@@ -521,9 +689,7 @@ export function summarizeEngagement(
 
   const activeSeconds = Math.max(0.15, elapsedTimeMs / 1000);
   const effectiveDps =
-    totalRoundsFired > 0
-      ? Math.round((totalHpDamage / activeSeconds) * 10) / 10
-      : 0;
+    totalRoundsFired > 0 ? Math.round((totalHpDamage / activeSeconds) * 10) / 10 : 0;
 
   return {
     totalRoundsFired,
@@ -542,6 +708,7 @@ export function summarizeEngagement(
   };
 }
 
+/** Formats millisecond durations into MM:SS.CC tactical log timestamps. */
 export function formatTimestampMs(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const mins = Math.floor(totalSeconds / 60)

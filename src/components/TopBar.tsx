@@ -1,13 +1,31 @@
+/**
+ * @file TopBar.tsx
+ * Global sticky navigation bar switching between Range Sim, Rooms, Armory, Targets,
+ * and Telemetry Archive without resetting active waves, deployed ordnance, or WebGL resources.
+ *
+ * Why CSS-hidden tab switching in the parent (`App.tsx`) is better than routing/unmounting:
+ * - Triggering `onSelectScreen` only toggles the visible tab state while keeping `SimulationCanvas3D`
+ *   mounted via CSS `hidden`. If switching to Armory or Targets unmounted the range canvas, the
+ *   Three.js WebGL2 context, compiled skybox/weather shaders, enemy meshes, and deployed mines/turrets
+ *   would be destroyed and require expensive synchronous GPU re-compilation on return.
+ * - Similarly, the single context-sensitive primary action button (`Engage` / `Halt Fire` / `Open Range`)
+ *   avoids cluttering the header with separate wave controls that could conflict with Pointer Lock.
+ */
 import React from 'react';
 import { AppScreen } from '../types/ballistics';
 
 interface TopBarProps {
+  /** Currently visible top-level screen (`range` | `rooms` | `armory` | `targets` | `telemetry`). */
   activeScreen: AppScreen;
+  /** Switches active tab without destroying the live simulation state. */
   onSelectScreen: (screen: AppScreen) => void;
+  /** Mirrors `isSimRunning` so the primary CTA swaps between `Engage` and `Halt Fire` on the range. */
   isSimRunning: boolean;
+  /** Starts/stops simulation when on `range`, or navigates back to `range` from other tabs. */
   onPrimaryAction: () => void;
 }
 
+/** Static navigation manifest kept outside render to avoid per-frame array reallocation. */
 const NAV_ITEMS: { id: AppScreen; label: string }[] = [
   { id: 'range', label: 'Range Sim' },
   { id: 'rooms', label: 'Rooms' },
@@ -16,6 +34,9 @@ const NAV_ITEMS: { id: AppScreen; label: string }[] = [
   { id: 'telemetry', label: 'Telemetry' },
 ];
 
+/**
+ * Sticky three-zone header: brand return button, single-line tab bar, and primary combat CTA.
+ */
 export const TopBar: React.FC<TopBarProps> = ({
   activeScreen,
   onSelectScreen,

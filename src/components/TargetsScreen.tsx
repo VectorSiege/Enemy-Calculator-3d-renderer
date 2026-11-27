@@ -1,13 +1,39 @@
+/**
+ * @file TargetsScreen.tsx
+ * Threat Profiles & Stagger Calibration screen permitting live tuning of every
+ * hostile chassis (HP, stagger threshold/duration/multiplier, hit-zone multipliers, speed,
+ * physical XZ/Y scale, and melee/claw damage & cadence).
+ *
+ * How live target stat mutation and TTK calculation work:
+ * - Every `StatNumberField` invokes `onUpdateTarget(target.id, patch)`, which updates the `targets`
+ *   state array in `App.tsx`. `SimulationCanvas3D` reads `propsRef.current.targets` on subsequent spawns,
+ *   hits, and movement ticks—meaning HP, speed, scale, and zone multipliers update cleanly without
+ *   restarting the app.
+ * - The right-hand Time-To-Kill Matrix runs `computeTheoreticalTelemetry` across all weapons for both
+ *   `weakspot` and `torso` aim zones at `config.distanceM`, updating reactively on every keystroke.
+ *
+ * Why clamped inline `StatNumberField` + wireframe SVGs over deferred "Apply" forms or 3D previews:
+ * - Deferred forms hide immediate TTK matrix feedback while iterating balance numbers; immediate
+ *   clamped updates (`Math.max(min, Math.min(max, parsed))`) prevent NaN/zero division while giving
+ *   instant table recalculation.
+ * - Inline SVG wireframes highlight weakspot vs armor geometry with zero extra WebGL context overhead.
+ */
 import React, { useState } from 'react';
 import { computeTheoreticalTelemetry } from '../engine/ballistics';
 import { SimulationConfig, TargetProfile, WeaponProfile } from '../types/ballistics';
 
 interface TargetsScreenProps {
+  /** Active simulation config (provides current `targetId` and `distanceM` for TTK matrix evaluation). */
   config: SimulationConfig;
+  /** Mutable array of all 7 hostile chassis profiles. */
   targets: TargetProfile[];
+  /** Mutable array of all weapons evaluated in the per-chassis TTK comparison table. */
   weapons: WeaponProfile[];
+  /** Merges a partial stat patch into the specified chassis inside `App.tsx`. */
   onUpdateTarget: (targetId: string, patch: Partial<TargetProfile>) => void;
+  /** Restores all chassis stats to factory defaults from `TARGETS`. */
   onResetTargets: () => void;
+  /** Sets the edited chassis as the active range target and switches back to the 3D Range tab. */
   onSelectTargetAndOpenRange: (targetId: string) => void;
 }
 
@@ -22,6 +48,9 @@ interface StatInputProps {
   onChange: (val: number) => void;
 }
 
+/**
+ * Clamped numeric stat cell ignoring transient `NaN` intermediate typing states (e.g. empty input).
+ */
 const StatNumberField: React.FC<StatInputProps> = ({
   label,
   value,
@@ -54,6 +83,9 @@ const StatNumberField: React.FC<StatInputProps> = ({
   </label>
 );
 
+/**
+ * Chassis intelligence editor and live Weakspot vs Armor TTK calculator across the entire arsenal.
+ */
 export const TargetsScreen: React.FC<TargetsScreenProps> = ({
   config,
   targets,
@@ -66,6 +98,7 @@ export const TargetsScreen: React.FC<TargetsScreenProps> = ({
   const target: TargetProfile =
     targets.find((t) => t.id === selectedId) ?? targets[0];
 
+  /** Renders the silhouette schematic with crimson weakspot crown and cyan armor plating. */
   const renderSchematicSvg = (t: TargetProfile) => {
     return (
       <svg viewBox="0 0 220 220" className="w-44 h-44 mx-auto" aria-hidden="true">
@@ -161,6 +194,74 @@ export const TargetsScreen: React.FC<TargetsScreenProps> = ({
             />
           </g>
         )}
+
+        {t.silhouette === 'tank' && (
+          <g>
+            <rect x="38" y="72" width="26" height="92" fill="none" stroke="#8c9bb5" strokeWidth="2" />
+            <rect x="156" y="72" width="26" height="92" fill="none" stroke="#8c9bb5" strokeWidth="2" />
+            <rect x="72" y="138" width="28" height="58" fill="none" stroke="#8c9bb5" strokeWidth="2" />
+            <rect x="120" y="138" width="28" height="58" fill="none" stroke="#8c9bb5" strokeWidth="2" />
+            <polygon
+              points="58,58 162,58 152,136 68,136"
+              fill="rgba(0,240,255,0.12)"
+              stroke="#00f0ff"
+              strokeWidth="2.2"
+            />
+            <rect
+              x="92"
+              y="32"
+              width="36"
+              height="24"
+              fill="rgba(255,42,75,0.24)"
+              stroke="#ff2a4b"
+              strokeWidth="2"
+            />
+          </g>
+        )}
+
+        {t.silhouette === 'swarmer' && (
+          <g>
+            <polyline points="86,126 56,158 68,186" fill="none" stroke="#20df78" strokeWidth="1.6" />
+            <polyline points="134,126 164,158 152,186" fill="none" stroke="#20df78" strokeWidth="1.6" />
+            <polyline points="78,108 42,118 32,146" fill="none" stroke="#20df78" strokeWidth="1.4" />
+            <polyline points="142,108 178,118 188,146" fill="none" stroke="#20df78" strokeWidth="1.4" />
+            <polygon
+              points="84,96 136,96 124,132 96,132"
+              fill="rgba(32,223,120,0.12)"
+              stroke="#00f0ff"
+              strokeWidth="1.8"
+            />
+            <circle
+              cx="110"
+              cy="82"
+              r="14"
+              fill="rgba(255,42,75,0.25)"
+              stroke="#ff2a4b"
+              strokeWidth="2"
+            />
+          </g>
+        )}
+
+        {t.silhouette === 'brute' && (
+          <g>
+            <polyline points="68,78 44,124 58,166" fill="none" stroke="#ffb300" strokeWidth="2" />
+            <polyline points="152,78 176,124 162,166" fill="none" stroke="#ffb300" strokeWidth="2" />
+            <rect x="78" y="138" width="22" height="58" fill="none" stroke="#8c9bb5" strokeWidth="1.8" />
+            <rect x="120" y="138" width="22" height="58" fill="none" stroke="#8c9bb5" strokeWidth="1.8" />
+            <polygon
+              points="70,66 150,66 138,136 82,136"
+              fill="rgba(255,179,0,0.12)"
+              stroke="#ffb300"
+              strokeWidth="2"
+            />
+            <polygon
+              points="90,34 130,34 122,62 98,62"
+              fill="rgba(255,42,75,0.25)"
+              stroke="#ff2a4b"
+              strokeWidth="2"
+            />
+          </g>
+        )}
       </svg>
     );
   };
@@ -194,7 +295,7 @@ export const TargetsScreen: React.FC<TargetsScreenProps> = ({
         </div>
       </div>
 
-      {/* 4 Target Selector Cards */}
+      {/* Hostile Target Selector Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {targets.map((t) => {
           const active = t.id === target.id;

@@ -25,6 +25,21 @@
   }
 }
 
+/* Force-hide OS cursor across entire window during active unpaused combat (revealed on Ctrl hold, E inventory, or Esc pause) */
+html.combat-cursor-locked,
+html.combat-cursor-locked *,
+body.combat-cursor-locked,
+body.combat-cursor-locked * {
+  cursor: none !important;
+}
+
+/* Cross-browser greyscale death filter (Chrome, Firefox, Safari/WebKit, Edge) */
+.viewport-greyscale {
+  -webkit-filter: grayscale(100%) contrast(1.06) brightness(0.84);
+  filter: grayscale(100%) contrast(1.06) brightness(0.84);
+  transition: filter 450ms ease, -webkit-filter 450ms ease;
+}
+
 /* 24px micro-grid vector dot pattern on Ballistic Carbon */
 .bg-tactical-grid {
   background-color: #0a0d12;
@@ -92,7 +107,12 @@
   box-shadow: 0 0 12px rgba(255, 42, 75, 0.35);
 }
 
-/* Precision HUD scrollbars */
+/* Precision HUD scrollbars (Firefox + Chromium/Safari) */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #232d42 #0a0d12;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
