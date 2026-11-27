@@ -860,7 +860,7 @@ export const GRENADES: GrenadeProfile[] = [
     maxUsages: 3,
     accentHex: '#20df78',
     description:
-      'Automated sentry (max 3 deployed, 500 HP, 0.7x armor mult) firing 22 DMG rounds (1.5x weakspot, 15m/50m drop) at 600 RPM. Cannot redeploy at cap until one is destroyed. [E] within 2m to pick up (3 charges).',
+      'Automated sentry (max 3 deployed, 150 HP, 0.7x armor mult) firing 22 DMG rounds (1.5x weakspot, 15m/50m drop) at 600 RPM. Cannot redeploy at cap until one is destroyed. [E] within 2m to pick up (3 charges).',
   },
 ];
 

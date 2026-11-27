@@ -40,7 +40,7 @@ export interface RoomDynamicLight {
   phaseDuration: number;
 }
 
-/** Interactive destructible tactical cover (~80 HP) allowing combatants to fight & expose upper chest/head. */
+/** Interactive destructible tactical cover (400 HP) allowing combatants to fight & expose upper chest/head. */
 export interface BreakableCover3D {
   id: string;
   x: number;
@@ -773,7 +773,7 @@ export function buildRoomEnvironment(
       breachNormal: new THREE.Vector3(0, 0.25, 1),
     };
 
-    // Breakable Tactical Corridor Barricades (~80 HP) allowing waist-up cover peeking for player & enemies
+    // Breakable Tactical Corridor Barricades (400 HP) allowing waist-up cover peeking for player & enemies
     const corridorCoverSpecs: {
       id: string;
       x: number;
@@ -844,8 +844,8 @@ export function buildRoomEnvironment(
         halfW: spec.w * 0.5,
         halfD: spec.d * 0.5,
         height: spec.h,
-        hp: 80,
-        maxHp: 80,
+        hp: 400,
+        maxHp: 400,
         broken: false,
         flashTimer: 0,
         flankRisk: spec.flankRisk,

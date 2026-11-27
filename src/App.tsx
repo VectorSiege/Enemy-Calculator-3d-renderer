@@ -1951,7 +1951,10 @@ export default function App() {
                 onOpenRooms={() => {
                   setActiveScreen('rooms');
                 }}
-                onOpenLoadout={() => setShowStartScreen(true)}
+                onOpenLoadout={() => {
+                  setIsPaused(false);
+                  setShowStartScreen(true);
+                }}
                 onSquadShotResolved={handleSquadShotResolved}
                 onEnemyClawAttack={handleEnemyClawAttack}
                 onEnemyDroneShot={handleEnemyDroneShot}

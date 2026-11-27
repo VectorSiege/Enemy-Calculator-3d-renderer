@@ -259,6 +259,7 @@ export interface EnemyWeaponSpec {
   recoilRecoverPerSec: number;
   projectileSpeed: number;
   homingTurnRateRad?: number;
+  splashRadiusM?: number;
   swingDurationSec?: number;
   swingStyle?: 'LONG_SWORD' | 'GREAT_SWORD' | 'HALBERD';
   colorHex: number;
@@ -300,6 +301,31 @@ export interface EnemyInternalComponents {
     leftLeg: number;
     rightLeg: number;
   };
+  headHp: number;
+  headMaxHp: number;
+  headExploded: boolean;
+  limbHp: {
+    leftArm: number;
+    rightArm: number;
+    leftLeg: number;
+    rightLeg: number;
+  };
+  limbMaxHp: {
+    leftArm: number;
+    rightArm: number;
+    leftLeg: number;
+    rightLeg: number;
+  };
+  armsDestroyed: {
+    leftArm: boolean;
+    rightArm: boolean;
+  };
+  atgmHp: number;
+  atgmMaxHp: number;
+  atgmDestroyed: boolean;
+  rocketPodHp: number;
+  rocketPodMaxHp: number;
+  rocketPodDestroyed: boolean;
   regionHits: Record<BodyRegionKey, number>;
 }
 

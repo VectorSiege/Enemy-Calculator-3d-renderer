@@ -41,6 +41,9 @@ export interface BuiltEnemy3D {
   loadout: EnemyLoadoutSpec;
   shieldGroup?: THREE.Group;
   shieldMat?: THREE.MeshStandardMaterial;
+  headGroup?: THREE.Group;
+  atgmGroup?: THREE.Group;
+  rocketPodGroups: THREE.Group[];
   weaponMuzzlePoint?: THREE.Object3D;
   rocketMuzzlePoints: THREE.Object3D[];
   regionMaterials: Record<BodyRegionKey, THREE.MeshStandardMaterial[]>;
@@ -824,6 +827,7 @@ export function buildEnemyModel3D(
 
   const isDrone = sil === 'drone';
   const rocketMuzzlePoints: THREE.Object3D[] = [];
+  const rocketPodGroups: THREE.Group[] = [];
 
   // =========================================================================
   // VANGUARD SHIELD DRONE: Mini flying chassis (NO legs, NO arms) + Shoulder ATGM
@@ -853,15 +857,17 @@ export function buildEnemyModel3D(
     dorsalCowling.rotation.x = -0.14;
     droneChassis.add(dorsalCowling);
 
-    // Tough forward armored face & optical brow
+    // Tough forward armored face & optical brow inside detachable headGroup
+    const droneHeadGroup = new THREE.Group();
+    droneHeadGroup.position.set(0, 0.24, 0.28);
     const facePlate = tagHitMesh(
       new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.28, 0.2), headPlateMat),
       'torso',
       'head'
     );
-    facePlate.position.set(0, 0.24, 0.28);
-    droneChassis.add(facePlate);
-    attachToughMechFace(droneChassis, 0, 0.24, 0.28, 0.44, 0.26, 0.2, false);
+    droneHeadGroup.add(facePlate);
+    attachToughMechFace(droneHeadGroup, 0, 0, 0, 0.44, 0.26, 0.2, false);
+    droneChassis.add(droneHeadGroup);
 
     // Central Stabilizer Lens (Weakspot — NO longer fires projectiles from here)
     const weakspotMesh = tagHitMesh(
@@ -901,24 +907,39 @@ export function buildEnemyModel3D(
       droneChassis.add(glowNozzle);
     }
 
-    // Shoulder-mounted ATGM Missile Pod on right dorsal winglet
+    // Shoulder-mounted ATGM Missile Pod on right dorsal winglet (90 HP, 0.6x armor)
     const atgmGroup = new THREE.Group();
     atgmGroup.position.set(0.38, 0.34, 0.04);
     const podBox = tagHitMesh(
       new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.22, 0.62), enemyGunMat),
       'torso',
-      'rightArm'
+      'torso'
     );
+    podBox.userData.subPart = 'atgm';
     const podRail = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.04, 0.52), trimMat);
     podRail.position.y = 0.12;
-    const tubeL = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.055, 0.055, 0.64, 8),
-      clawMat
+    const tubeL = tagHitMesh(
+      new THREE.Mesh(
+        new THREE.CylinderGeometry(0.055, 0.055, 0.64, 8),
+        clawMat
+      ),
+      'torso',
+      'torso'
     );
     tubeL.rotation.x = Math.PI / 2;
     tubeL.position.set(-0.055, 0, 0.03);
-    const tubeR = tubeL.clone();
+    tubeL.userData.subPart = 'atgm';
+    const tubeR = tagHitMesh(
+      new THREE.Mesh(
+        new THREE.CylinderGeometry(0.055, 0.055, 0.64, 8),
+        clawMat
+      ),
+      'torso',
+      'torso'
+    );
+    tubeR.rotation.x = Math.PI / 2;
     tubeR.position.set(0.055, 0, 0.03);
+    tubeR.userData.subPart = 'atgm';
     atgmGroup.add(podBox, podRail, tubeL, tubeR);
 
     const weaponMuzzlePoint = new THREE.Object3D();
@@ -945,6 +966,9 @@ export function buildEnemyModel3D(
       hitMeshes,
       weakspotHeight: hoverCenterY * target.scaleY,
       loadout,
+      headGroup: droneHeadGroup,
+      atgmGroup,
+      rocketPodGroups,
       weaponMuzzlePoint,
       rocketMuzzlePoints,
       regionMaterials,
@@ -1167,7 +1191,7 @@ export function buildEnemyModel3D(
       upperBodyPivot.add(spine);
     }
 
-    // Brute Larger Shoulder-Mounted Rocket Pods (24-round volley pods on left & right shoulders)
+    // Brute Larger Shoulder-Mounted Rocket Pods (24-round volley pods on left & right shoulders, 120 HP, 0.8x armor)
     if (loadout.rocketPodWeaponId === 'enemy_rocket_pods') {
       for (const side of [-1, 1] as const) {
         const podGrp = new THREE.Group();
@@ -1175,11 +1199,17 @@ export function buildEnemyModel3D(
         const podShell = tagHitMesh(
           new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.28, 0.46), enemyGunMat),
           'torso',
-          side === -1 ? 'leftArm' : 'rightArm',
+          'torso',
           true
         );
-        const podCap = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.06, 0.48), trimMat);
+        podShell.userData.subPart = 'rocket_pods';
+        const podCap = tagHitMesh(
+          new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.06, 0.48), trimMat),
+          'torso',
+          'torso'
+        );
         podCap.position.y = 0.14;
+        podCap.userData.subPart = 'rocket_pods';
         podGrp.add(podShell, podCap);
 
         // 4x3 Rocket Launch Tube grid on the front face
@@ -1198,6 +1228,7 @@ export function buildEnemyModel3D(
         podMuzzle.position.set(0, 0, 0.3);
         podGrp.add(podMuzzle);
         rocketMuzzlePoints.push(podMuzzle);
+        rocketPodGroups.push(podGrp);
         upperBodyPivot.add(podGrp);
       }
     }
@@ -1214,6 +1245,9 @@ export function buildEnemyModel3D(
   // === HEAD / DEFINED TOUGH FACE / WEAKSPOT ===
   let weakspotMesh: THREE.Mesh;
   const headLocalY = abdomenH + chestH + 0.22;
+  const headGroup = new THREE.Group();
+  headGroup.position.set(0, headLocalY, 0);
+  upperBodyPivot.add(headGroup);
 
   if (isMech) {
     // Ventral Gyro Core weakspot in chest + tough armored recon head
@@ -1223,15 +1257,16 @@ export function buildEnemyModel3D(
       'torso'
     );
     weakspotMesh.position.set(0, chestCenterY, chestD * 0.5 + 0.08);
+    upperBodyPivot.add(weakspotMesh);
     const cowl = tagHitMesh(
       new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.28, 0.34), headPlateMat),
       'torso',
       'head',
       true
     );
-    cowl.position.set(0, headLocalY, 0.04);
-    upperBodyPivot.add(cowl);
-    attachToughMechFace(upperBodyPivot, 0, headLocalY, 0.04, 0.34, 0.28, 0.34, false);
+    cowl.position.set(0, 0, 0.04);
+    headGroup.add(cowl);
+    attachToughMechFace(headGroup, 0, 0, 0.04, 0.34, 0.28, 0.34, false);
   } else if (isTank) {
     weakspotMesh = tagHitMesh(
       new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.28, 0.36), weakspotMat),
@@ -1239,8 +1274,9 @@ export function buildEnemyModel3D(
       'head',
       true
     );
-    weakspotMesh.position.set(0, headLocalY + 0.02, 0.08);
-    attachToughMechFace(upperBodyPivot, 0, headLocalY + 0.02, 0.08, 0.42, 0.28, 0.36, true);
+    weakspotMesh.position.set(0, 0.02, 0.08);
+    headGroup.add(weakspotMesh);
+    attachToughMechFace(headGroup, 0, 0.02, 0.08, 0.42, 0.28, 0.36, true);
   } else if (isSwarmer) {
     weakspotMesh = tagHitMesh(
       new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.28, 0.32), weakspotMat),
@@ -1248,8 +1284,9 @@ export function buildEnemyModel3D(
       'head',
       true
     );
-    weakspotMesh.position.set(0, headLocalY - 0.01, 0.1);
-    attachToughMechFace(upperBodyPivot, 0, headLocalY - 0.01, 0.1, 0.32, 0.28, 0.32, true);
+    weakspotMesh.position.set(0, -0.01, 0.1);
+    headGroup.add(weakspotMesh);
+    attachToughMechFace(headGroup, 0, -0.01, 0.1, 0.32, 0.28, 0.32, true);
   } else {
     weakspotMesh = tagHitMesh(
       new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.32, 0.32), weakspotMat),
@@ -1257,11 +1294,12 @@ export function buildEnemyModel3D(
       'head',
       true
     );
-    weakspotMesh.position.set(0, headLocalY, isBrute ? 0.10 : 0.05);
+    weakspotMesh.position.set(0, 0, isBrute ? 0.10 : 0.05);
+    headGroup.add(weakspotMesh);
     attachToughMechFace(
-      upperBodyPivot,
+      headGroup,
       0,
-      headLocalY,
+      0,
       isBrute ? 0.10 : 0.05,
       0.32,
       0.32,
@@ -1269,12 +1307,12 @@ export function buildEnemyModel3D(
       true
     );
   }
-  upperBodyPivot.add(weakspotMesh);
 
+  const wsLocalYInUpper = isMech ? weakspotMesh.position.y : headLocalY + weakspotMesh.position.y;
   const weakspotWorldY =
     hipY +
     0.11 +
-    Math.cos(torsoPitch) * weakspotMesh.position.y -
+    Math.cos(torsoPitch) * wsLocalYInUpper -
     Math.sin(torsoPitch) * weakspotMesh.position.z;
 
   // === ARTICULATED ARMS + SHIELD / MELEE WEAPONS / RANGED WEAPONS ===
@@ -1659,6 +1697,8 @@ export function buildEnemyModel3D(
     loadout,
     shieldGroup,
     shieldMat,
+    headGroup,
+    rocketPodGroups,
     weaponMuzzlePoint,
     rocketMuzzlePoints,
     regionMaterials,

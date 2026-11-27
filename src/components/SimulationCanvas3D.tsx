@@ -262,6 +262,10 @@ interface DroneProjectile {
   turnRateRad?: number;
   speedMps?: number;
   sourceWeaponId?: EnemyWeaponSpec['id'];
+  splashRadiusM?: number;
+  canHitEnemies?: boolean;
+  sourceActorUid?: number;
+  ignoreSelfSec?: number;
 }
 
 interface ImpactSpark3D {
@@ -1793,11 +1797,8 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
     simRef.current.impactSparks = sparkPool;
     simRef.current.impactDecals = decalPool;
 
-    // Pre-allocated armor weathering shades: grey mixed with light brown -> medium rust -> dark rust brown
-    const _wearGreyLightBrown = new THREE.Color(0x88796d);
-    const _wearMidRust = new THREE.Color(0x6b432b);
+    // Pre-allocated cover damage tint shades
     const _wearDarkRust = new THREE.Color(0x3a1c13);
-    const _wearVarTint = new THREE.Color(0x7c7369);
     const _wearWorkColor = new THREE.Color();
 
     /**
@@ -1959,7 +1960,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         loadout: model.loadout,
         shieldHp: model.loadout.shieldMaxHp,
         shieldMaxHp: model.loadout.shieldMaxHp,
-        components: buildInitialEnemyComponents(profile),
+        components: buildInitialEnemyComponents(profile, hp),
         regionFlashTimers: {
           head: 0,
           torso: 0,
@@ -2088,58 +2089,13 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
     };
 
     /**
-     * Progressive Localized Armor Weathering (`updateRegionWeathering`):
-     * Interpolates struck body-region meshes (head, torso, left/right arm, left/right leg, shield)
-     * across three corrosion/scorch stops:
-     * 1. Original factory hull -> grey mixed with very light brown (`_wearGreyLightBrown`).
-     * 2. Light brown-grey -> medium oxidized rust (`_wearMidRust`).
-     * 3. Medium rust -> dark rust brown (`_wearDarkRust`), plus matte roughness shift (`0.42 -> 0.90`).
-     * Uses localized hit counts weighted alongside remaining overall HP/shield ratio so areas shot
-     * repeatedly show severe rust wear even before total squad elimination.
-     *
-     * Why an alternative would be worse: baking damage textures onto every mech with a 2D `<canvas>`
-     * per region would allocate dozens of redundant GPU textures per wave; mutating material scalar
-     * color/roughness per cloned region material achieves distinct hue progression with zero textures.
+     * Preserves factory enemy chassis material colors on hit (localized part color shifting removed).
+     * Bullet impact feedback relies on kinetic spark bursts (`spawnBulletImpact`), floating damage
+     * numbers, destructible arm/head/pod detachments, and HUD component flags instead of full-part
+     * hull color tinting.
      */
     const updateRegionWeathering = (actor: EnemyActor, region: BodyRegionKey) => {
-      const mats = actor.model.regionMaterials[region];
-      if (!mats || mats.length === 0) return;
-
-      const hits = actor.components.regionHits[region] ?? 0;
-      const hpLoss = 1 - Math.max(0, actor.hp) / Math.max(1, actor.maxHp);
-      const shieldLoss =
-        region === 'shield' && actor.shieldMaxHp > 0
-          ? 1 - Math.max(0, actor.shieldHp) / actor.shieldMaxHp
-          : 0;
-
-      const wear = THREE.MathUtils.clamp(
-        hits * 0.16 + (region === 'shield' ? shieldLoss * 0.65 : hpLoss * 0.45),
-        0,
-        1
-      );
-
-      for (let i = 0; i < mats.length; i++) {
-        const mat = mats[i];
-        const base = actor.model.baseRegionColors.get(mat) ?? mat.color;
-        if (wear < 0.35) {
-          const t = wear / 0.35;
-          _wearWorkColor.copy(base).lerp(_wearGreyLightBrown, t);
-        } else if (wear < 0.7) {
-          const t = (wear - 0.35) / 0.35;
-          _wearWorkColor.copy(_wearGreyLightBrown).lerp(_wearMidRust, t);
-        } else {
-          const t = (wear - 0.7) / 0.3;
-          _wearWorkColor.copy(_wearMidRust).lerp(_wearDarkRust, t);
-        }
-        // Subtle per-hit/per-plate grey-brown variance so armor weathering looks organic
-        if (((actor.uid + hits + i) % 3) === 0 && wear > 0.15) {
-          _wearWorkColor.lerp(_wearVarTint, 0.22);
-        }
-        mat.color.copy(_wearWorkColor);
-        mat.roughness = THREE.MathUtils.lerp(0.42, 0.9, wear);
-        mat.metalness = THREE.MathUtils.lerp(0.68, 0.18, wear);
-      }
-      actor.regionFlashTimers[region] = 0.08;
+      actor.regionFlashTimers[region] = 0.06;
     };
 
     /**
@@ -2729,39 +2685,304 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
       checkSquadCleared();
     };
 
+    /** Detonates an enemy head assembly, hiding head meshes and eliminating the mech if still alive. */
+    const triggerHeadExplosion = (actor: EnemyActor) => {
+      const comp = actor.components;
+      if (comp.headExploded) return;
+      comp.headExploded = true;
+      comp.headHp = 0;
+      comp.capacitors.head = 0;
+      comp.viewingLensHp = 0;
+
+      if (actor.model.headGroup) {
+        actor.model.headGroup.visible = false;
+        actor.model.headGroup.traverse((obj) => {
+          obj.visible = false;
+        });
+      }
+      for (const hm of actor.model.hitMeshes) {
+        if (hm.userData.bodyRegion === 'head') {
+          hm.visible = false;
+        }
+      }
+
+      const headY = actor.model.weakspotHeight;
+      spawnExplosionRing(actor.x, headY, actor.z, 0xff2a4b, 1.85);
+      spawnBulletImpact(_vec3B.set(actor.x, headY, actor.z), null, 'ENEMY');
+      soundEngine.playGrenadeExplode();
+      simRef.current.cameraShake = Math.max(simRef.current.cameraShake, 0.42);
+
+      if (actor.alive) {
+        const rem = Math.max(1, actor.hp);
+        applyDamageAndStagger(actor, 0, 0);
+        pushHitVisuals(rem, true, true, false, 0, {
+          x: actor.x,
+          y: headY + 0.35,
+          z: actor.z,
+        });
+        checkSquadCleared();
+      }
+    };
+
+    /** Severs a destroyed arm (20% total HP), hiding its meshes and dropping shield / arm weaponry. */
+    const destroyEnemyArm = (actor: EnemyActor, side: 'leftArm' | 'rightArm') => {
+      const comp = actor.components;
+      if (comp.armsDestroyed[side]) return;
+      comp.armsDestroyed[side] = true;
+      comp.limbHp[side] = 0;
+      comp.capacitors[side] = 0;
+
+      const armGroup = side === 'leftArm' ? actor.model.leftClawArm : actor.model.rightClawArm;
+      armGroup.visible = false;
+      armGroup.traverse((obj) => {
+        obj.visible = false;
+      });
+      for (const hm of actor.model.hitMeshes) {
+        if (hm.userData.bodyRegion === side) {
+          hm.visible = false;
+        }
+      }
+
+      if (side === 'leftArm') {
+        if (actor.shieldHp > 0) {
+          actor.shieldHp = 0;
+        }
+        if (actor.model.shieldGroup) {
+          actor.model.shieldGroup.visible = false;
+          actor.model.shieldGroup.traverse((obj) => {
+            obj.visible = false;
+          });
+        }
+        for (const hm of actor.model.hitMeshes) {
+          if (hm.userData.isShield) hm.visible = false;
+        }
+        if (actor.clawAnimType === 'LEFT' || actor.clawAnimType === 'DUAL_WINDUP' || actor.clawAnimType === 'DUAL_STRIKE') {
+          actor.clawAnimType = 'NONE';
+        }
+      } else {
+        if (actor.clawAnimType === 'RIGHT' || actor.clawAnimType === 'DUAL_WINDUP' || actor.clawAnimType === 'DUAL_STRIKE') {
+          actor.clawAnimType = 'NONE';
+        }
+      }
+
+      const yaw = actor.model.root.rotation.y;
+      const sideSign = side === 'leftArm' ? -1 : 1;
+      const sx = actor.x + Math.cos(yaw) * sideSign * 0.45 * actor.profile.scaleXZ;
+      const sz = actor.z - Math.sin(yaw) * sideSign * 0.45 * actor.profile.scaleXZ;
+      const sy = 1.35 * actor.profile.scaleY;
+      spawnExplosionRing(sx, sy, sz, 0xff8a30, 1.15);
+      spawnBulletImpact(_vec3B.set(sx, sy, sz), null, 'ENEMY');
+      soundEngine.playDoorBreak();
+    };
+
+    /**
+     * Destroys an enemy ATGM Launcher (90 HP @ 0.6x) or Shoulder Rocket Pods (120 HP @ 0.8x),
+     * triggering a localized explosion AND firing any remaining loaded ordnance in wild random arcs.
+     */
+    const triggerWeaponPodDestruction = (actor: EnemyActor, kind: 'atgm' | 'rocket_pods') => {
+      const s = simRef.current;
+      const p = propsRef.current;
+      const comp = actor.components;
+
+      if (kind === 'atgm') {
+        if (comp.atgmDestroyed) return;
+        comp.atgmDestroyed = true;
+        comp.atgmHp = 0;
+      } else {
+        if (comp.rocketPodDestroyed) return;
+        comp.rocketPodDestroyed = true;
+        comp.rocketPodHp = 0;
+      }
+
+      const podPos = new THREE.Vector3(actor.x, Math.max(1.2, actor.profile.scaleY * 1.55), actor.z);
+      if (kind === 'atgm' && actor.model.atgmGroup) {
+        actor.model.atgmGroup.getWorldPosition(podPos);
+        actor.model.atgmGroup.visible = false;
+        actor.model.atgmGroup.traverse((obj) => {
+          obj.visible = false;
+        });
+      } else if (kind === 'rocket_pods' && actor.model.rocketPodGroups.length > 0) {
+        actor.model.rocketPodGroups[0].getWorldPosition(podPos);
+        for (const pg of actor.model.rocketPodGroups) {
+          pg.visible = false;
+          pg.traverse((obj) => {
+            obj.visible = false;
+          });
+        }
+      }
+      for (const hm of actor.model.hitMeshes) {
+        if (hm.userData.subPart === kind) {
+          hm.visible = false;
+        }
+      }
+
+      const radiusM = kind === 'atgm' ? 3.8 : 4.2;
+      const maxSplash = kind === 'atgm' ? 58 : 72;
+      soundEngine.playReactorExplosion();
+      spawnExplosionRing(podPos.x, podPos.y, podPos.z, 0xa855f7, radiusM);
+      s.cameraShake = Math.max(s.cameraShake, 0.58);
+
+      // Blast damage to host mech
+      if (actor.alive) {
+        const selfDmg = Math.max(20, Math.round(kind === 'atgm' ? 42 : 58));
+        const selfOut = applyDamageAndStagger(actor, Math.max(0, actor.hp - selfDmg), 35);
+        pushHitVisuals(selfDmg, true, selfOut.killed, selfOut.triggeredStagger, 0, {
+          x: podPos.x,
+          y: podPos.y + 0.35,
+          z: podPos.z,
+        });
+      }
+
+      // Splash nearby enemies, covers, turrets, and player
+      for (const other of s.enemies) {
+        if (!other.alive || other === actor) continue;
+        const d = Math.hypot(other.x - podPos.x, other.z - podPos.z);
+        if (d <= radiusM + 0.5 * other.profile.scaleXZ) {
+          const falloff = THREE.MathUtils.clamp(1 - d / Math.max(1, radiusM + 0.5), 0.3, 1.0);
+          const splashDmg = Math.max(6, Math.round(maxSplash * falloff));
+          const out = applyDamageAndStagger(other, Math.max(0, other.hp - splashDmg), Math.round(splashDmg * 0.45));
+          pushHitVisuals(splashDmg, false, out.killed, out.triggeredStagger, 0, {
+            x: other.x,
+            y: other.profile.scaleY * 1.4,
+            z: other.z,
+          });
+        }
+      }
+      for (const cov of currentRoom.covers) {
+        if (!cov.broken && Math.hypot(cov.x - podPos.x, cov.z - podPos.z) <= radiusM + 0.8) {
+          damageCover(cov, Math.round(maxSplash * 0.5));
+        }
+      }
+      for (let ti = s.turrets.length - 1; ti >= 0; ti--) {
+        const tur = s.turrets[ti];
+        const td = Math.hypot(tur.pos.x - podPos.x, tur.pos.z - podPos.z);
+        if (td <= radiusM + 0.6) {
+          const tf = THREE.MathUtils.clamp(1 - td / (radiusM + 0.6), 0.3, 1.0);
+          damageDeployableTurret(tur, Math.round(maxSplash * tf));
+        }
+      }
+      if (p.playerHp > 0) {
+        const dp = Math.hypot(s.playerX - podPos.x, s.playerZ - podPos.z);
+        if (dp <= radiusM + 0.4) {
+          const pf = THREE.MathUtils.clamp(1 - dp / (radiusM + 0.4), 0.3, 1.0);
+          const pDmg = Math.max(3, Math.round(16 * pf));
+          setDamageFlashAlpha((prev) => Math.max(prev, 0.34));
+          p.onEnemyWeaponAttack(
+            'ENEMY_EXPLOSION',
+            pDmg,
+            actor.profile.name,
+            kind === 'atgm' ? 'ATGM Pod Cook-Off' : 'Rocket Pod Cook-Off',
+            Math.max(1, Math.round(dp))
+          );
+        }
+      }
+
+      // Misfire any remaining loaded rounds randomly outward
+      const spec =
+        kind === 'atgm'
+          ? ENEMY_WEAPONS.enemy_atgm
+          : ENEMY_WEAPONS.enemy_rocket_pods;
+      const loadedRounds = kind === 'atgm' ? actor.rangedMag : actor.podMag;
+      if (kind === 'atgm') {
+        actor.rangedMag = 0;
+        actor.rangedReloadTimer = 0;
+      } else {
+        actor.podMag = 0;
+        actor.podReloadTimer = 0;
+      }
+
+      if (loadedRounds > 0) {
+        soundEngine.playEnemyWeaponFire(spec.id);
+        for (let m = 0; m < loadedRounds; m++) {
+          const randYaw = Math.random() * Math.PI * 2;
+          const randPitch = -0.18 + Math.random() * 0.68;
+          const cosP = Math.cos(randPitch);
+          const wildDir = new THREE.Vector3(
+            Math.cos(randYaw) * cosP,
+            Math.sin(randPitch),
+            Math.sin(randYaw) * cosP
+          ).normalize();
+
+          const boltMat = new THREE.MeshStandardMaterial({
+            color: spec.colorHex,
+            emissive: spec.colorHex,
+            emissiveIntensity: 2.3,
+            roughness: 0.2,
+          });
+          const boltMesh = new THREE.Mesh(droneBoltGeo, boltMat);
+          boltMesh.scale.setScalar(kind === 'atgm' ? 1.35 : 1.25);
+          boltMesh.position.set(
+            podPos.x + (Math.random() - 0.5) * 0.35,
+            Math.max(0.45, podPos.y + (Math.random() - 0.5) * 0.25),
+            podPos.z + (Math.random() - 0.5) * 0.35
+          );
+          scene.add(boltMesh);
+
+          s.droneProjectiles.push({
+            mesh: boltMesh,
+            vx: wildDir.x * spec.projectileSpeed,
+            vy: wildDir.y * spec.projectileSpeed,
+            vz: wildDir.z * spec.projectileSpeed,
+            gravity: 1.6,
+            damage: spec.damage,
+            attackerName: `${actor.profile.name} (Misfire)`,
+            life: 4.0,
+            isHoming: false,
+            turnRateRad: 0,
+            speedMps: spec.projectileSpeed,
+            sourceWeaponId: spec.id,
+            splashRadiusM: spec.splashRadiusM ?? (kind === 'atgm' ? 1.4 : 1.0),
+            canHitEnemies: true,
+            sourceActorUid: actor.uid,
+            ignoreSelfSec: 0.28,
+          });
+        }
+      }
+
+      checkSquadCleared();
+    };
+
     /**
      * Routes localized hit energy into the mech's internal components (Power Supply, Battery,
-     * Capacitors, Viewing Lens, Mechanisms) and updates region-specific progressive weathering.
+     * Capacitors, Viewing Lens, Mechanisms, Limbs, and Head). Handles destructible arms (20% HP)
+     * and explosive head destruction when head HP reaches 0 or on lethal headshots.
      */
     const applyComponentHit = (
       actor: EnemyActor,
       region: BodyRegionKey,
       localY: number,
       hpDamage: number,
-      isWeakspot: boolean
+      isWeakspot: boolean,
+      wasKilledByHit = false
     ): { executedByHeadCap: boolean } => {
       const comp = actor.components;
       comp.regionHits[region] = (comp.regionHits[region] ?? 0) + 1;
-      const compDmg = Math.max(1, Math.round(hpDamage * 0.44));
+      const dmg = Math.max(1, hpDamage);
+      const compDmg = Math.max(1, Math.round(dmg * 0.6));
 
       if (region !== 'shield') {
-        comp.capacitors[region] = Math.max(0, comp.capacitors[region] - compDmg * 0.85);
+        comp.capacitors[region] = Math.max(0, comp.capacitors[region] - dmg * 0.85);
       }
 
-      if (region === 'torso') {
-        // Center torso houses the volatile Power Supply and reserve Battery
-        const centerBand = localY >= 0.82 && localY <= 1.65;
+      if (region === 'leftArm' || region === 'rightArm' || region === 'leftLeg' || region === 'rightLeg') {
+        comp.limbHp[region] = Math.max(0, comp.limbHp[region] - dmg);
+        comp.mechanismsHp = Math.max(0, comp.mechanismsHp - compDmg * 0.7);
+        if ((region === 'leftArm' || region === 'rightArm') && comp.limbHp[region] <= 0 && !comp.armsDestroyed[region]) {
+          destroyEnemyArm(actor, region);
+        }
+      } else if (region === 'torso') {
+        // Center torso houses Power Supply (12.5% HP / Armor) and Reserve Battery
+        const centerBand = actor.profile.silhouette === 'drone' || (localY >= 0.72 && localY <= 1.72);
         comp.powerSupplyHp = Math.max(
           0,
-          comp.powerSupplyHp - compDmg * (centerBand ? 0.95 : 0.42)
+          comp.powerSupplyHp - dmg * (centerBand ? 1.0 : 0.45)
         );
-        comp.batteryHp = Math.max(0, comp.batteryHp - compDmg * (centerBand ? 0.62 : 0.35));
-        comp.mechanismsHp = Math.max(0, comp.mechanismsHp - compDmg * 0.45);
-      } else if (region === 'head' || isWeakspot) {
-        comp.viewingLensHp = Math.max(0, comp.viewingLensHp - compDmg * 0.92);
-        comp.capacitors.head = Math.max(0, comp.capacitors.head - compDmg * 0.4);
-      } else if (region !== 'shield') {
-        comp.mechanismsHp = Math.max(0, comp.mechanismsHp - compDmg * 0.7);
+        comp.batteryHp = Math.max(0, comp.batteryHp - compDmg * (centerBand ? 0.8 : 0.42));
+        comp.mechanismsHp = Math.max(0, comp.mechanismsHp - compDmg * 0.55);
+      } else if (region === 'head' || (isWeakspot && actor.profile.silhouette !== 'mech')) {
+        comp.headHp = Math.max(0, comp.headHp - dmg);
+        comp.viewingLensHp = Math.max(0, comp.viewingLensHp - dmg * 0.9);
+        comp.capacitors.head = Math.max(0, comp.capacitors.head - dmg * 0.65);
       }
 
       updateRegionWeathering(actor, region);
@@ -2772,7 +2993,13 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         triggerComponentExplosion(actor, 'BATTERY');
       }
 
-      // Destroyed head capacitor can execute weakened or critically pierced mechs
+      // Heads only explode when head HP (25% total HP / armor, capped at 75% total HP) is depleted
+      if (comp.headHp <= 0 && !comp.headExploded) {
+        triggerHeadExplosion(actor);
+        return { executedByHeadCap: !actor.alive };
+      }
+
+      // Destroyed head capacitor can execute weakened or critically pierced mechs without exploding head
       if (
         actor.alive &&
         (region === 'head' || isWeakspot) &&
@@ -3171,7 +3398,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               grenade.staggerDamage,
               grenade.staggerDurationMult
             );
-            applyComponentHit(actor, hitHead ? 'head' : 'torso', hitHead ? 1.9 : 1.2, dmg, hitHead);
+            applyComponentHit(actor, hitHead ? 'head' : 'torso', hitHead ? 1.9 : 1.2, dmg, hitHead, outcome.killed);
             if (grenade.id === 'incendiary' && actor.alive) {
               actor.burnSlowTimer = Math.max(actor.burnSlowTimer, 0.75);
             }
@@ -3341,7 +3568,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         const dmg = Math.max(1, Math.round(profile.damage * falloff * zoneMult * pierceShare));
         const nextHp = Math.max(0, actor.hp - dmg);
         const outcome = applyDamageAndStagger(actor, nextHp, profile.staggerDamage, 1.0);
-        applyComponentHit(actor, hitHead ? 'head' : 'torso', hitHead ? 1.9 : 1.2, dmg, hitHead);
+        applyComponentHit(actor, hitHead ? 'head' : 'torso', hitHead ? 1.9 : 1.2, dmg, hitHead, outcome.killed);
         totalDmg += dmg;
         if (outcome.killed) {
           anyKill = true;
@@ -3855,7 +4082,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         built.root.rotation.y = baseYaw;
         scene.add(built.root);
 
-        const maxTurretHp = grenade.turretHp ?? 500;
+        const maxTurretHp = grenade.turretHp ?? 150;
         s.turrets.push({
           uid,
           mesh: built.root,
@@ -3969,7 +4196,11 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
       const reach = melee.reachM + 0.55;
       const aliveHitMeshes: THREE.Mesh[] = [];
       for (const actor of s.enemies) {
-        if (actor.alive) aliveHitMeshes.push(...actor.model.hitMeshes);
+        if (actor.alive) {
+          for (const hm of actor.model.hitMeshes) {
+            if (hm.visible) aliveHitMeshes.push(hm);
+          }
+        }
       }
       const envHitMeshes = currentRoom.environmentHitMeshes.filter((m) => m.visible);
       const deployableHitMeshes = getDeployableHitMeshes();
@@ -3991,7 +4222,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           const cov = currentRoom.covers.find((c) => c.id === hitData.coverId);
           if (cov && !cov.broken) {
             soundEngine.playMeleeImpact(false, s.meleeStrikeIsShove);
-            damageCover(cov, s.meleeStrikeDamage);
+            damageCover(cov, s.meleeStrikeDamage * 0.3);
             const wn = rayHits[0].face
               ? rayHits[0].face.normal.clone().transformDirection(rayHits[0].object.matrixWorld).normalize()
               : null;
@@ -4012,6 +4243,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
       let directZone: HitZoneId = p.config.aimZone;
       let directRegion: BodyRegionKey = 'torso';
       let directHitShield = false;
+      let directSubPart: 'atgm' | 'rocket_pods' | undefined;
       let directHitPoint: THREE.Vector3 | null = null;
 
       for (const h of rayHits) {
@@ -4022,10 +4254,14 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           const candidate = s.enemies.find((e) => e.uid === enemyIdx && e.alive) ?? null;
           if (!candidate) continue;
           if (h.object.userData.isShield && candidate.shieldHp <= 0) continue;
+          const sp = h.object.userData.subPart as 'atgm' | 'rocket_pods' | undefined;
+          if (sp === 'atgm' && candidate.components.atgmDestroyed) continue;
+          if (sp === 'rocket_pods' && candidate.components.rocketPodDestroyed) continue;
           directActor = candidate;
           directZone = (h.object.userData.hitZone as HitZoneId) ?? 'torso';
           directRegion = (h.object.userData.bodyRegion as BodyRegionKey) ?? 'torso';
           directHitShield = Boolean(h.object.userData.isShield && candidate.shieldHp > 0);
+          directSubPart = sp;
           directHitPoint = h.point.clone();
           break;
         }
@@ -4146,11 +4382,18 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         }
 
         const wasStaggered = actor.staggerTimer > 0;
+        const targetProfileForHit =
+          actor === directActor && directSubPart
+            ? {
+                ...actor.profile,
+                torsoMultiplier: directSubPart === 'atgm' ? 0.6 : 0.8,
+              }
+            : actor.profile;
         const res = resolveMeleeHit(
           weapon,
-          actor.profile,
+          targetProfileForHit,
           actor.hp,
-          zone,
+          actor === directActor && directSubPart ? 'torso' : zone,
           s.meleeStrikeDamage,
           s.meleeStrikeStaggerOverride,
           wasStaggered,
@@ -4158,12 +4401,24 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         );
 
         const outcome = applyDamageAndStagger(actor, res.nextHp, res.staggerDamage);
+        if (actor === directActor && directSubPart === 'atgm' && !actor.components.atgmDestroyed) {
+          actor.components.atgmHp = Math.max(0, actor.components.atgmHp - res.hpDamage);
+          if (actor.components.atgmHp <= 0) {
+            triggerWeaponPodDestruction(actor, 'atgm');
+          }
+        } else if (actor === directActor && directSubPart === 'rocket_pods' && !actor.components.rocketPodDestroyed) {
+          actor.components.rocketPodHp = Math.max(0, actor.components.rocketPodHp - res.hpDamage);
+          if (actor.components.rocketPodHp <= 0) {
+            triggerWeaponPodDestruction(actor, 'rocket_pods');
+          }
+        }
         const compOutcome = applyComponentHit(
           actor,
           region,
           zone === 'weakspot' ? 1.8 : zone === 'limb' ? 0.65 : 1.25,
           res.hpDamage,
-          res.isCrit
+          res.isCrit,
+          outcome.killed
         );
         const finalKilled = outcome.killed || compOutcome.executedByHeadCap || !actor.alive;
         if (finalKilled) {
@@ -4392,7 +4647,9 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
       const aliveHitMeshes: THREE.Mesh[] = [];
       for (const actor of s.enemies) {
         if (actor.alive) {
-          aliveHitMeshes.push(...actor.model.hitMeshes);
+          for (const hm of actor.model.hitMeshes) {
+            if (hm.visible) aliveHitMeshes.push(hm);
+          }
         }
       }
       const envHitMeshes = currentRoom.environmentHitMeshes.filter((m) => m.visible);
@@ -4551,7 +4808,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               const cov = currentRoom.covers.find((c) => c.id === hit.object.userData.coverId);
               if (cov && !cov.broken) {
                 anyDoorHit = true;
-                damageCover(cov, weapon.baseDamage * (pellets > 1 ? 0.65 : 1));
+                damageCover(cov, weapon.baseDamage * (pellets > 1 ? 0.65 : 1) * 0.3);
                 spawnBulletImpact(hit.point, worldNormal, 'COVER');
                 terminalHitPoint = hit.point;
                 blockerDist = hit.distance;
@@ -4647,9 +4904,14 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               break;
             }
 
+            const subPart = hit.object.userData.subPart as 'atgm' | 'rocket_pods' | undefined;
+            if (subPart === 'atgm' && actor.components.atgmDestroyed) continue;
+            if (subPart === 'rocket_pods' && actor.components.rocketPodDestroyed) continue;
+
             pelletHitSomething = true;
             hitEnemyIds.add(enemyIdx);
-            const hitZone = (hit.object.userData.hitZone as HitZoneId) ?? 'torso';
+            const rawHitZone = (hit.object.userData.hitZone as HitZoneId) ?? 'torso';
+            const hitZone: HitZoneId = subPart ? 'torso' : rawHitZone;
             const bodyRegion: BodyRegionKey =
               (hit.object.userData.bodyRegion as BodyRegionKey) ??
               (hitZone === 'weakspot' ? 'head' : 'torso');
@@ -4660,6 +4922,14 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
             const penFactor = Math.pow(dropRatio, pelletPierceIdx);
             const wasStaggered = actor.staggerTimer > 0;
 
+            const targetsForHit = subPart
+              ? p.targets.map((tp) =>
+                  tp.id === actor.profile.id
+                    ? { ...tp, torsoMultiplier: subPart === 'atgm' ? 0.6 : 0.8 }
+                    : tp
+                )
+              : p.targets;
+
             const res = resolveShot(
               p.config,
               actor.hp,
@@ -4669,7 +4939,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               distMeters,
               actor.profile.id,
               p.weapons,
-              p.targets,
+              targetsForHit,
               penFactor,
               wasStaggered
             );
@@ -4679,12 +4949,27 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
             actor.model.root.worldToLocal(_vec3C);
 
             const outcome = applyDamageAndStagger(actor, res.nextHp, res.staggerDamage);
+            let podDestroyedNow = false;
+            if (subPart === 'atgm' && !actor.components.atgmDestroyed) {
+              actor.components.atgmHp = Math.max(0, actor.components.atgmHp - res.hpDamage);
+              if (actor.components.atgmHp <= 0) {
+                podDestroyedNow = true;
+                triggerWeaponPodDestruction(actor, 'atgm');
+              }
+            } else if (subPart === 'rocket_pods' && !actor.components.rocketPodDestroyed) {
+              actor.components.rocketPodHp = Math.max(0, actor.components.rocketPodHp - res.hpDamage);
+              if (actor.components.rocketPodHp <= 0) {
+                podDestroyedNow = true;
+                triggerWeaponPodDestruction(actor, 'rocket_pods');
+              }
+            }
             const compOutcome = applyComponentHit(
               actor,
               bodyRegion,
               _vec3C.y,
               res.hpDamage,
-              res.isCrit
+              res.isCrit,
+              outcome.killed
             );
             const finalKilled = outcome.killed || compOutcome.executedByHeadCap || !actor.alive;
             if (finalKilled) {
@@ -4721,10 +5006,19 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
 
             if (pelletPierceIdx === 0) {
               primaryZone = hitZone;
+              const resolvedZoneLabel = subPart === 'atgm'
+                ? podDestroyedNow
+                  ? 'ATGM POD DESTROYED'
+                  : 'ATGM Launcher (0.6x)'
+                : subPart === 'rocket_pods'
+                  ? podDestroyedNow
+                    ? 'ROCKET PODS DESTROYED'
+                    : 'Rocket Pods (0.8x)'
+                  : res.zoneLabel;
               primaryZoneLabel =
                 pellets > 1
-                  ? `${hitCount}/${pellets} Pellets · ${res.zoneLabel}`
-                  : `${res.zoneLabel}${wasStaggered ? ' [STAG]' : ''}`;
+                  ? `${hitCount}/${pellets} Pellets · ${resolvedZoneLabel}`
+                  : `${resolvedZoneLabel}${wasStaggered ? ' [STAG]' : ''}`;
               primaryTargetName = actor.profile.name;
               primaryDistM = distMeters;
               primaryRemHp = actor.hp;
@@ -7123,6 +7417,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
             turnRateRad: spec.homingTurnRateRad ?? 0,
             speedMps: spec.projectileSpeed,
             sourceWeaponId: spec.id,
+            splashRadiusM: spec.splashRadiusM,
           });
         };
 
@@ -7467,7 +7762,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               1.0
             );
 
-            if (actor.waypointIdx >= actor.waypoints.length) {
+            if (actor.waypointIdx >= actor.waypoints.length && !comp.atgmDestroyed) {
               if (actor.rangedReloadTimer > 0) {
                 actor.rangedReloadTimer = Math.max(0, actor.rangedReloadTimer - delta);
                 actor.droneChargeTimer = 0;
@@ -7579,10 +7874,11 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           const effectiveMeleeReach = actor.meleeDist + (targetTurret ? 0.35 : 0);
           const isSwarmer = actor.profile.silhouette === 'swarmer';
 
-          // Brute Shoulder Rocket Pods volley (500 RPM, 24 rounds, 18s reload, 24 m/s, min recoil)
-          const podSpec = actor.loadout.rocketPodWeaponId
-            ? ENEMY_WEAPONS[actor.loadout.rocketPodWeaponId]
-            : null;
+          // Brute Shoulder Rocket Pods volley (240 RPM, 24 rounds, 9s reload, 30 m/s, 1m drop-radius splash)
+          const podSpec =
+            actor.loadout.rocketPodWeaponId && !comp.rocketPodDestroyed
+              ? ENEMY_WEAPONS[actor.loadout.rocketPodWeaponId]
+              : null;
           if (podSpec) {
             if (actor.podReloadTimer > 0) {
               actor.podReloadTimer = Math.max(0, actor.podReloadTimer - delta);
@@ -7621,7 +7917,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
                     spawnEnemyBullet(startPos, dirToTarget, podSpec, actor.profile.name);
                     soundEngine.playEnemyWeaponFire(podSpec.id);
                     actor.podMag -= 1;
-                    actor.podCooldown = 60 / podSpec.rpm; // 0.12s
+                    actor.podCooldown = 60 / podSpec.rpm;
                     if (actor.podMag <= 0) {
                       actor.podReloadTimer = podSpec.reloadSec;
                     }
@@ -7638,7 +7934,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
            * - Computes `lastEffectiveAccuracy` from base spread + dynamic recoil + broken arm/head/lens
            *   capacitor penalties (`compSpreadPenaltyDeg`).
            * - Whenever effective accuracy drops below `0.62` or the mech enters magazine reload, it scans
-           *   intact 80-HP covers (`currentRoom.covers`), heavily penalizes `flankRisk === 'HIGH'`
+           *   intact 400-HP covers (`currentRoom.covers`), heavily penalizes `flankRisk === 'HIGH'`
            *   covers (+18 score penalty), avoids covers closer than 4m to the target, and positions
            *   itself strictly on the far side (`cov.z + czSign * (cov.halfD + 0.92)`) so its back is
            *   shielded while peeking over the cover to return fire.
@@ -7649,9 +7945,10 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
            */
           let enemyShouldHoldForRanged = false;
           let coverGoalPos: { x: number; z: number } | null = null;
-          if (rangedSpec) {
+          const activeRangedSpec = rangedSpec && !comp.armsDestroyed.rightArm ? rangedSpec : null;
+          if (activeRangedSpec) {
             const effectiveSpreadDeg =
-              rangedSpec.baseSpreadDeg + actor.rangedRecoilDeg + compSpreadPenaltyDeg;
+              activeRangedSpec.baseSpreadDeg + actor.rangedRecoilDeg + compSpreadPenaltyDeg;
             actor.lastEffectiveAccuracy = THREE.MathUtils.clamp(
               1 - effectiveSpreadDeg / 18,
               0.08,
@@ -7681,7 +7978,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
                   // Strongly penalize high-flank-risk covers where the target lane can sweep behind them
                   const flankPenalty = cov.flankRisk === 'HIGH' ? 18 : 0;
                   // Reward covers behind enemy's facing lane so its back faces away from the threat
-                  const prefRange = getEnemyPreferredRangeM(rangedSpec.id);
+                  const prefRange = getEnemyPreferredRangeM(activeRangedSpec.id);
                   const standOffDist = Math.abs(dTargetToCov - Math.min(20, prefRange));
                   const score = flankPenalty + dCov * 0.7 + standOffDist * 0.65;
                   if (score < bestScore) {
@@ -7704,13 +8001,13 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               };
             }
 
-            const prefFireRange = getEnemyPreferredRangeM(rangedSpec.id);
+            const prefFireRange = getEnemyPreferredRangeM(activeRangedSpec.id);
 
             // Fire ranged weapon when inside preferred range corridor and LoS is clear
             if (actor.rangedReloadTimer > 0) {
               actor.rangedReloadTimer = Math.max(0, actor.rangedReloadTimer - delta);
               if (actor.rangedReloadTimer === 0) {
-                actor.rangedMag = rangedSpec.magSize;
+                actor.rangedMag = activeRangedSpec.magSize;
               }
             } else {
               actor.rangedFireCooldown = Math.max(0, actor.rangedFireCooldown - delta);
@@ -7740,20 +8037,20 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
 
                   if (!blocked) {
                     const spreadRad = THREE.MathUtils.degToRad(effectiveSpreadDeg);
-                    for (let pIdx = 0; pIdx < rangedSpec.pellets; pIdx++) {
+                    for (let pIdx = 0; pIdx < activeRangedSpec.pellets; pIdx++) {
                       const shotDir = new THREE.Vector3(
                         dirToTarget.x + (Math.random() - 0.5) * spreadRad,
                         dirToTarget.y + (Math.random() - 0.5) * spreadRad * 0.65,
                         dirToTarget.z + (Math.random() - 0.5) * spreadRad
                       ).normalize();
-                      spawnEnemyBullet(startPos, shotDir, rangedSpec, actor.profile.name);
+                      spawnEnemyBullet(startPos, shotDir, activeRangedSpec, actor.profile.name);
                     }
-                    soundEngine.playEnemyWeaponFire(rangedSpec.id);
+                    soundEngine.playEnemyWeaponFire(activeRangedSpec.id);
                     actor.rangedMag -= 1;
-                    actor.rangedRecoilDeg += rangedSpec.recoilPerShotDeg;
-                    actor.rangedFireCooldown = 60 / rangedSpec.rpm;
+                    actor.rangedRecoilDeg += activeRangedSpec.recoilPerShotDeg;
+                    actor.rangedFireCooldown = 60 / activeRangedSpec.rpm;
                     if (actor.rangedMag <= 0) {
-                      actor.rangedReloadTimer = rangedSpec.reloadSec;
+                      actor.rangedReloadTimer = activeRangedSpec.reloadSec;
                     }
                   } else {
                     actor.rangedFireCooldown = 0.22;
@@ -8347,9 +8644,12 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
 
             const atkMult = actor.profile.attackSpeedMult * armMeleeSpeedMult;
             const specMult = actor.profile.specialAttackSpeedMult * armMeleeSpeedMult;
-            const meleeSpec = actor.loadout.meleeWeaponId
-              ? ENEMY_WEAPONS[actor.loadout.meleeWeaponId]
-              : null;
+            const meleeSpec =
+              actor.loadout.meleeWeaponId && !comp.armsDestroyed.rightArm
+                ? ENEMY_WEAPONS[actor.loadout.meleeWeaponId]
+                : null;
+            const canSwingLeft = !comp.armsDestroyed.leftArm && !actor.loadout.hasShield;
+            const canSwingRight = !comp.armsDestroyed.rightArm;
 
             if (actor.clawAnimType === 'NONE') {
               actor.model.leftClawArm.rotation.x = THREE.MathUtils.damp(
@@ -8360,7 +8660,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               );
               actor.model.rightClawArm.rotation.x = THREE.MathUtils.damp(
                 actor.model.rightClawArm.rotation.x,
-                rangedSpec ? -1.12 : 0,
+                activeRangedSpec ? -1.12 : 0,
                 14,
                 delta
               );
@@ -8418,19 +8718,27 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               }
 
               actor.attackCooldown -= delta;
-              if (actor.attackCooldown <= 0) {
+              if (actor.attackCooldown <= 0 && (canSwingLeft || canSwingRight)) {
                 actor.attackCount += 1;
-                if (meleeSpec) {
+                if (meleeSpec && canSwingRight) {
                   actor.clawAnimType = 'RIGHT';
                   actor.clawAnimPhase = 0;
                   actor.singleStrikeExecuted = false;
                   soundEngine.playEnemyAttack(meleeSpec.id === 'enemy_great_sword');
-                } else if (actor.attackCount % 3 === 0) {
+                } else if (actor.attackCount % 3 === 0 && canSwingLeft && canSwingRight) {
                   actor.clawAnimType = 'DUAL_WINDUP';
                   actor.clawAnimPhase = 0;
                   actor.dualStrikeExecuted = false;
                 } else {
-                  actor.clawAnimType = actor.attackCount % 2 === 0 ? 'LEFT' : 'RIGHT';
+                  const nextSide: 'LEFT' | 'RIGHT' =
+                    canSwingLeft && canSwingRight
+                      ? actor.attackCount % 2 === 0
+                        ? 'LEFT'
+                        : 'RIGHT'
+                      : canSwingRight
+                        ? 'RIGHT'
+                        : 'LEFT';
+                  actor.clawAnimType = nextSide;
                   actor.clawAnimPhase = 0;
                   actor.singleStrikeExecuted = false;
                   soundEngine.playEnemyAttack(false);
@@ -8700,10 +9008,83 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           actor.model.root.lookAt(combatTargetX, 0, combatTargetZ);
         }
 
+        // Helper for 1m drop-radius rocket pod / misfire explosions
+        const triggerEnemyRocketExplosion = (
+          impactPos: THREE.Vector3,
+          proj: DroneProjectile,
+          directHit?: { kind: 'PLAYER' | 'TURRET' | 'ENEMY' | 'COVER'; actor?: EnemyActor; turret?: DeployableTurret3D; cov?: BreakableCover3D }
+        ) => {
+          const r = proj.splashRadiusM ?? 0;
+          if (r <= 0) return;
+          spawnExplosionRing(impactPos.x, Math.max(0.18, impactPos.y), impactPos.z, 0xff6a00, r * 1.4);
+          soundEngine.playGrenadeExplode();
+
+          // Splash damage to player with linear distance drop over 1m radius
+          if (p.playerHp > 0 && directHit?.kind !== 'PLAYER') {
+            const dp = Math.hypot(impactPos.x - s.playerX, impactPos.y - 1.15, impactPos.z - s.playerZ);
+            if (dp < r) {
+              const factor = THREE.MathUtils.clamp(1 - dp / r, 0, 1);
+              const splashDmg = Math.max(1, Math.round(proj.damage * factor));
+              setDamageFlashAlpha((prev) => Math.max(prev, 0.22));
+              p.onEnemyWeaponAttack(
+                'ENEMY_RANGED',
+                splashDmg,
+                proj.attackerName,
+                'Rocket Splash (1m)',
+                Math.max(1, Math.round(Math.hypot(impactPos.x - s.playerX, impactPos.z - s.playerZ)))
+              );
+            }
+          }
+
+          // Splash damage to turrets
+          for (let ti = s.turrets.length - 1; ti >= 0; ti--) {
+            const tur = s.turrets[ti];
+            if (directHit?.turret === tur) continue;
+            const dt = Math.hypot(impactPos.x - tur.pos.x, impactPos.y - tur.pos.y, impactPos.z - tur.pos.z);
+            if (dt < r + 0.35) {
+              const factor = THREE.MathUtils.clamp(1 - dt / (r + 0.35), 0, 1);
+              damageDeployableTurret(tur, Math.max(1, Math.round(proj.damage * factor)));
+            }
+          }
+
+          // Splash damage to covers
+          for (const cov of currentRoom.covers) {
+            if (cov.broken || directHit?.cov === cov) continue;
+            const dc = Math.hypot(impactPos.x - cov.x, impactPos.z - cov.z);
+            if (dc < r + 0.6) {
+              const factor = THREE.MathUtils.clamp(1 - dc / (r + 0.6), 0, 1);
+              damageCover(cov, Math.max(1, Math.round(proj.damage * 2.0 * factor)));
+            }
+          }
+
+          // Splash damage to enemies when projectile came from a misfired pod
+          if (proj.canHitEnemies) {
+            for (const actor of s.enemies) {
+              if (!actor.alive || directHit?.actor === actor) continue;
+              const de = Math.hypot(impactPos.x - actor.x, impactPos.z - actor.z);
+              if (de < r + 0.4 * actor.profile.scaleXZ) {
+                const factor = THREE.MathUtils.clamp(1 - de / (r + 0.4 * actor.profile.scaleXZ), 0, 1);
+                const eDmg = Math.max(1, Math.round(proj.damage * factor));
+                const out = applyDamageAndStagger(actor, Math.max(0, actor.hp - eDmg), 6);
+                applyComponentHit(actor, 'torso', impactPos.y, eDmg, false, out.killed);
+                pushHitVisuals(eDmg, false, out.killed, out.triggeredStagger, 0, {
+                  x: actor.x,
+                  y: actor.profile.scaleY * 1.4,
+                  z: actor.z,
+                });
+              }
+            }
+            checkSquadCleared();
+          }
+        };
+
         // Advance Enemy Projectiles (Ranged Firearms, Homing ATGM Missiles, & Brute Rockets)
         for (let i = s.droneProjectiles.length - 1; i >= 0; i--) {
           const proj = s.droneProjectiles[i];
           proj.life -= delta;
+          if (proj.ignoreSelfSec && proj.ignoreSelfSec > 0) {
+            proj.ignoreSelfSec = Math.max(0, proj.ignoreSelfSec - delta);
+          }
 
           if (proj.isHoming && (p.playerHp > 0 || s.turrets.length > 0) && (proj.turnRateRad ?? 0) > 0) {
             const spd = proj.speedMps ?? Math.max(1, Math.hypot(proj.vx, proj.vy, proj.vz));
@@ -8733,7 +9114,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
             const wantDir = _vec3B
               .set(htx - proj.mesh.position.x, hty - proj.mesh.position.y, htz - proj.mesh.position.z)
               .normalize();
-            const maxTurn = (proj.turnRateRad ?? 0.88) * delta;
+            const maxTurn = (proj.turnRateRad ?? 1.42) * delta;
             const dot = THREE.MathUtils.clamp(curDir.dot(wantDir), -1, 1);
             const ang = Math.acos(dot);
             if (ang > 0.001) {
@@ -8756,6 +9137,9 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           const stepLen = stepVec.length();
 
           let remove = proj.life <= 0 || nextPos.y <= 0.05;
+          let hitSplashTarget:
+            | { kind: 'PLAYER' | 'TURRET' | 'ENEMY' | 'COVER'; actor?: EnemyActor; turret?: DeployableTurret3D; cov?: BreakableCover3D }
+            | undefined;
 
           if (!remove && stepLen > 0.001) {
             raycaster.set(prevPos, stepVec.divideScalar(stepLen));
@@ -8769,11 +9153,13 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
                 const cov = currentRoom.covers.find((c) => c.id === hit.object.userData.coverId);
                 if (cov && !cov.broken) {
                   damageCover(cov, Math.max(4, Math.round(proj.damage * 2.5)));
+                  hitSplashTarget = { kind: 'COVER', cov };
                 }
                 spawnBulletImpact(hit.point, normal, 'COVER');
               } else {
                 spawnBulletImpact(hit.point, normal, 'ENV');
               }
+              nextPos.copy(hit.point);
               remove = true;
             }
           }
@@ -8788,6 +9174,36 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
             remove = true;
           }
 
+          // Misfired pod projectiles can directly impact alive enemies
+          if (!remove && proj.canHitEnemies) {
+            for (const actor of s.enemies) {
+              if (!actor.alive) continue;
+              if (actor.uid === proj.sourceActorUid && (proj.ignoreSelfSec ?? 0) > 0) continue;
+              const edx = proj.mesh.position.x - actor.x;
+              const edz = proj.mesh.position.z - actor.z;
+              const maxR = 0.58 * actor.profile.scaleXZ;
+              if (
+                edx * edx + edz * edz <= maxR * maxR &&
+                proj.mesh.position.y >= 0.05 &&
+                proj.mesh.position.y <= actor.profile.scaleY * 2.15
+              ) {
+                remove = true;
+                hitSplashTarget = { kind: 'ENEMY', actor };
+                const eDmg = Math.max(1, Math.round(proj.damage));
+                const out = applyDamageAndStagger(actor, Math.max(0, actor.hp - eDmg), 8);
+                applyComponentHit(actor, 'torso', proj.mesh.position.y, eDmg, false, out.killed);
+                pushHitVisuals(eDmg, false, out.killed, out.triggeredStagger, 0, {
+                  x: actor.x,
+                  y: Math.max(0.5, proj.mesh.position.y),
+                  z: actor.z,
+                });
+                spawnBulletImpact(proj.mesh.position, null, 'ENEMY');
+                checkSquadCleared();
+                break;
+              }
+            }
+          }
+
           if (!remove && s.turrets.length > 0) {
             for (let ti = s.turrets.length - 1; ti >= 0; ti--) {
               const tur = s.turrets[ti];
@@ -8796,6 +9212,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               const tdz = proj.mesh.position.z - tur.pos.z;
               if (tdx * tdx + tdy * tdy + tdz * tdz <= 0.64) {
                 remove = true;
+                hitSplashTarget = { kind: 'TURRET', turret: tur };
                 damageDeployableTurret(tur, Math.max(1, Math.round(proj.damage)));
                 break;
               }
@@ -8808,6 +9225,7 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
             const dz = proj.mesh.position.z - s.playerZ;
             if (dx * dx + dy * dy + dz * dz <= 0.42) {
               remove = true;
+              hitSplashTarget = { kind: 'PLAYER' };
               setDamageFlashAlpha((prev) => Math.max(prev, 0.24));
               if (proj.sourceWeaponId && proj.sourceWeaponId !== 'enemy_atgm') {
                 p.onEnemyWeaponAttack(
@@ -8824,6 +9242,9 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           }
 
           if (remove) {
+            if ((proj.splashRadiusM ?? 0) > 0) {
+              triggerEnemyRocketExplosion(proj.mesh.position, proj, hitSplashTarget);
+            }
             scene.remove(proj.mesh);
             (proj.mesh.material as THREE.Material).dispose();
             s.droneProjectiles.splice(i, 1);
@@ -9363,10 +9784,14 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               );
               const shotDir = _vec3C.subVectors(impactW, muzzleW).normalize();
               raycaster.set(muzzleW, shotDir);
-              const actorHits = raycaster.intersectObjects(lockedActor.model.hitMeshes, false);
+              const actorHits = raycaster.intersectObjects(
+                lockedActor.model.hitMeshes.filter((hm) => hm.visible),
+                false
+              );
 
               let hitZone: HitZoneId = 'torso';
               let hitRegion: BodyRegionKey = 'torso';
+              let hitSubPart: 'atgm' | 'rocket_pods' | undefined;
               let shieldHit = false;
               let actualImpact = impactW;
               if (actorHits.length > 0) {
@@ -9375,7 +9800,8 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
                 if (h.object.userData.isShield && lockedActor.shieldHp > 0) {
                   shieldHit = true;
                 } else {
-                  hitZone = (h.object.userData.hitZone as HitZoneId) ?? 'torso';
+                  hitSubPart = h.object.userData.subPart as 'atgm' | 'rocket_pods' | undefined;
+                  hitZone = hitSubPart ? 'torso' : ((h.object.userData.hitZone as HitZoneId) ?? 'torso');
                   hitRegion = (h.object.userData.bodyRegion as BodyRegionKey) ?? (hitZone === 'weakspot' ? 'head' : 'torso');
                 }
               }
@@ -9397,16 +9823,30 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
               } else {
                 const hDist = muzzleW.distanceTo(actualImpact);
                 const falloff = computeConsumableFalloff(turretProfile, hDist);
-                const zoneMult = computeConsumableZoneMult(turretProfile, lockedActor, hitZone);
+                const zoneMult = hitSubPart
+                  ? (hitSubPart === 'atgm' ? 0.6 : 0.8) * (lockedActor.staggerTimer > 0 ? lockedActor.profile.staggerDamageMultiplier : 1.0)
+                  : computeConsumableZoneMult(turretProfile, lockedActor, hitZone);
                 const dmg = Math.max(1, Math.round(turretProfile.damage * falloff * zoneMult));
                 const nextHp = Math.max(0, lockedActor.hp - dmg);
                 const outcome = applyDamageAndStagger(lockedActor, nextHp, Math.round(turretProfile.damage * 0.45));
+                if (hitSubPart === 'atgm' && !lockedActor.components.atgmDestroyed) {
+                  lockedActor.components.atgmHp = Math.max(0, lockedActor.components.atgmHp - dmg);
+                  if (lockedActor.components.atgmHp <= 0) {
+                    triggerWeaponPodDestruction(lockedActor, 'atgm');
+                  }
+                } else if (hitSubPart === 'rocket_pods' && !lockedActor.components.rocketPodDestroyed) {
+                  lockedActor.components.rocketPodHp = Math.max(0, lockedActor.components.rocketPodHp - dmg);
+                  if (lockedActor.components.rocketPodHp <= 0) {
+                    triggerWeaponPodDestruction(lockedActor, 'rocket_pods');
+                  }
+                }
                 applyComponentHit(
                   lockedActor,
                   hitRegion,
                   actualImpact.y,
                   dmg,
-                  hitZone === 'weakspot'
+                  hitZone === 'weakspot',
+                  outcome.killed
                 );
                 pushHitVisuals(dmg, hitZone === 'weakspot', outcome.killed, outcome.triggeredStagger, 0, {
                   x: actualImpact.x,
@@ -9504,7 +9944,9 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
         for (const actor of s.enemies) {
           if (actor.alive) {
             aliveCount += 1;
-            aliveHitMeshes.push(...actor.model.hitMeshes);
+            for (const hm of actor.model.hitMeshes) {
+              if (hm.visible) aliveHitMeshes.push(hm);
+            }
             const dSq =
               (actor.x - s.playerX) * (actor.x - s.playerX) +
               (actor.z - s.playerZ) * (actor.z - s.playerZ);
@@ -9547,12 +9989,17 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           const compFlags: string[] = [];
           if (dc.powerSupplyHp <= 0 || dc.powerSupplyHp < dc.powerSupplyMaxHp * 0.4) compFlags.push('PWR');
           if (dc.batteryHp < dc.batteryMaxHp * 0.85) compFlags.push('BAT');
-          if (dc.capacitors.head <= 0) compFlags.push('C-HD');
+          if (dc.headExploded) compFlags.push('NO-HD');
+          else if (dc.capacitors.head <= 0) compFlags.push('C-HD');
           if (dc.capacitors.torso <= 0) compFlags.push('C-TR');
-          if (dc.capacitors.leftArm <= 0 || dc.capacitors.rightArm <= 0) compFlags.push('C-AR');
+          if (dc.armsDestroyed.leftArm) compFlags.push('NO-LA');
+          if (dc.armsDestroyed.rightArm) compFlags.push('NO-RA');
+          if (!dc.armsDestroyed.leftArm && !dc.armsDestroyed.rightArm && (dc.capacitors.leftArm <= 0 || dc.capacitors.rightArm <= 0)) compFlags.push('C-AR');
           if (dc.capacitors.leftLeg <= 0 || dc.capacitors.rightLeg <= 0) compFlags.push('C-LG');
-          if (dc.viewingLensHp <= 0) compFlags.push('OPT');
+          if (dc.viewingLensHp <= 0 && !dc.headExploded) compFlags.push('OPT');
           if (dc.mechanismsHp <= 0) compFlags.push('MECH');
+          if (dc.atgmDestroyed) compFlags.push('NO-ATGM');
+          if (dc.rocketPodDestroyed) compFlags.push('NO-PODS');
           const weaponNames: string[] = [];
           if (displayActor.loadout.rangedWeaponId) {
             weaponNames.push(ENEMY_WEAPONS[displayActor.loadout.rangedWeaponId].name);
@@ -10763,8 +11210,8 @@ export const SimulationCanvas3D: React.FC<SimulationCanvas3DProps> = ({
           </div>
         )}
 
-        {/* Pause Overlay (Keybinds shown ONLY on pause menu) */}
-        {isPaused && (
+        {/* Pause Overlay (Keybinds shown ONLY on pause menu; hidden whenever Start/Loadout screen is visible) */}
+        {!startOverlay && isPaused && (
           <div className="absolute inset-0 z-30 bg-[#0a0d12]/88 flex items-center justify-center p-6">
             <div className="w-full max-w-sm bg-[#121721] border border-[#ffb300] p-5 space-y-4 text-center">
               <div>

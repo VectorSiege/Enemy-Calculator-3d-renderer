@@ -23,7 +23,7 @@ export const ENEMY_WEAPONS: Record<
     damage: 0.3,
     pellets: 1,
     rpm: 150,
-    reloadSec: 3.5,
+    reloadSec: 4.5,
     magSize: 30,
     recoilPerShotDeg: 1.85,
     baseSpreadDeg: 2.8,
@@ -53,8 +53,8 @@ export const ENEMY_WEAPONS: Record<
     damage: 12,
     pellets: 1,
     rpm: 360,
-    reloadSec: 7.0,
-    magSize: 12,
+    reloadSec: 9.0,
+    magSize: 2,
     recoilPerShotDeg: 6.8,
     baseSpreadDeg: 2.2,
     recoilRecoverPerSec: 3.0,
@@ -67,7 +67,7 @@ export const ENEMY_WEAPONS: Record<
     name: '20mm Cannon',
     damage: 8,
     pellets: 1,
-    rpm: 240,
+    rpm: 140,
     reloadSec: 6.0,
     magSize: 12,
     recoilPerShotDeg: 3.4,
@@ -89,7 +89,7 @@ export const ENEMY_WEAPONS: Record<
     baseSpreadDeg: 1.4,
     recoilRecoverPerSec: 3.6,
     projectileSpeed: 32,
-    homingTurnRateRad: 1.14,
+    homingTurnRateRad: 1.42,
     colorHex: 0xff2a4b,
   },
   enemy_rocket_pods: {
@@ -105,6 +105,7 @@ export const ENEMY_WEAPONS: Record<
     baseSpreadDeg: 2.4,
     recoilRecoverPerSec: 5.5,
     projectileSpeed: 30,
+    splashRadiusM: 1.0,
     colorHex: 0xff7b29,
   },
   enemy_long_sword: {
@@ -252,18 +253,31 @@ export function getEnemyLoadoutForSpawn(
   };
 }
 
-/** Initializes internal sub-components scaled to the enemy profile's default HP. */
-export function buildInitialEnemyComponents(profile: TargetProfile): EnemyInternalComponents {
-  const hp = Math.max(60, profile.defaultHp);
-  const psMax = Math.max(40, Math.round(hp * 0.24));
-  const batMax = Math.max(36, Math.round(hp * 0.22));
-  const lensMax = Math.max(24, Math.round(hp * 0.14));
-  const mechMax = Math.max(38, Math.round(hp * 0.22));
+/** Initializes internal sub-components scaled to the enemy profile's HP and armor. */
+export function buildInitialEnemyComponents(
+  profile: TargetProfile,
+  totalHpOverride?: number
+): EnemyInternalComponents {
+  const hp = Math.max(20, totalHpOverride ?? profile.defaultHp);
+  const armorMult = Math.max(0.05, profile.torsoMultiplier);
+  // Power supply health = 12.5% of total HP divided by armor multiplier
+  const psMax = Math.max(1, Math.round((hp * 0.125) / armorMult));
+  const batMax = Math.max(24, Math.round(hp * 0.22));
+  const lensMax = Math.max(18, Math.round(hp * 0.14));
+  const mechMax = Math.max(26, Math.round(hp * 0.22));
 
-  const capHead = Math.max(26, Math.round(hp * 0.16));
-  const capTorso = Math.max(42, Math.round(hp * 0.26));
-  const capArm = Math.max(28, Math.round(hp * 0.17));
-  const capLeg = Math.max(30, Math.round(hp * 0.18));
+  // Limbs (arms & legs) each carry 20% of total HP
+  const limbMax = Math.max(1, Math.round(hp * 0.2));
+  // Head health = 25% of total HP divided by armor multiplier, capped at 75% of total HP
+  const headMax = Math.max(
+    1,
+    Math.min(Math.round(hp * 0.75), Math.round((hp * 0.25) / armorMult))
+  );
+
+  const capHead = Math.max(20, Math.round(hp * 0.16));
+  const capTorso = Math.max(32, Math.round(hp * 0.26));
+  const capArm = limbMax;
+  const capLeg = limbMax;
 
   const siphonPool: EnemyInternalComponents['batterySiphonTarget'][] = [
     'leftArm',
@@ -303,6 +317,31 @@ export function buildInitialEnemyComponents(profile: TargetProfile): EnemyIntern
       leftLeg: capLeg,
       rightLeg: capLeg,
     },
+    headHp: headMax,
+    headMaxHp: headMax,
+    headExploded: false,
+    limbHp: {
+      leftArm: limbMax,
+      rightArm: limbMax,
+      leftLeg: limbMax,
+      rightLeg: limbMax,
+    },
+    limbMaxHp: {
+      leftArm: limbMax,
+      rightArm: limbMax,
+      leftLeg: limbMax,
+      rightLeg: limbMax,
+    },
+    armsDestroyed: {
+      leftArm: false,
+      rightArm: false,
+    },
+    atgmHp: 90,
+    atgmMaxHp: 90,
+    atgmDestroyed: false,
+    rocketPodHp: 120,
+    rocketPodMaxHp: 120,
+    rocketPodDestroyed: false,
     regionHits: {
       head: 0,
       torso: 0,

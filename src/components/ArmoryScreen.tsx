@@ -481,7 +481,7 @@ export const ArmoryScreen: React.FC<ArmoryScreenProps> = ({
                           : inspectedConsumable.id === 'sticky_c4'
                             ? `+${(inspectedConsumable.armorReduction ?? 0.3).toFixed(1)} Mult`
                             : inspectedConsumable.id === 'deployable_turret'
-                              ? `${inspectedConsumable.turretHp ?? 500} / ${(inspectedConsumable.turretArmorMult ?? 0.7).toFixed(1)}x`
+                              ? `${inspectedConsumable.turretHp ?? 150} / ${(inspectedConsumable.turretArmorMult ?? 0.7).toFixed(1)}x`
                               : inspectedConsumable.kind === 'GRENADE'
                                 ? '3.0s Cook-Off'
                                 : 'Armed Trap',
@@ -677,7 +677,7 @@ export const ArmoryScreen: React.FC<ArmoryScreenProps> = ({
                       <>
                         <WeaponStatField
                           label="Turret HP"
-                          value={inspectedConsumable.turretHp ?? 500}
+                          value={inspectedConsumable.turretHp ?? 150}
                           unit="HP"
                           min={50}
                           max={2500}
