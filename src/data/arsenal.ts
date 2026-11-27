@@ -851,7 +851,7 @@ export const GRENADES: GrenadeProfile[] = [
     dropRangeM: 50.0,
     damage: 22,
     weakspotMultiplier: 1.5,
-    turretHp: 500,
+    turretHp: 150,
     turretArmorMult: 0.7,
     turretMaxDeployed: 3,
     staggerDamage: 24,
