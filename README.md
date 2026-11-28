@@ -1,5 +1,9 @@
 # Aegis Tactical Telemetry — 3D Combat & Ballistics Sandbox
 
+Github Repository: https://github.com/VectorSiege/Enemy-Calculator-3d-renderer
+
+Live site: https://enemy-calculator-3d-renderer.vercel.app
+
 ## Design goals
 
 The idea was to create a immersive sandbox where users can toggle from multiple weapon parameters to different enemy parameter to suit or modify how a weapon changes a person's play style.
